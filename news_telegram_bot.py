@@ -8,10 +8,9 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 
 BASE_QUERY = (
@@ -23,7 +22,7 @@ BASE_QUERY = (
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 OPENAI_RESPONSES_API = "https://api.openai.com/v1/responses"
 STATE_PATH = Path(__file__).with_name("state.json")
-KST = ZoneInfo("Asia/Seoul")
+KST = timezone(timedelta(hours=9), name="KST")
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -63,10 +62,10 @@ def save_state(state: dict) -> None:
 
 
 def build_rss_url() -> str:
-    days_back = os.getenv("GOOGLE_NEWS_DAYS_BACK", "").strip()
+    lookback = get_news_lookback()
     query = BASE_QUERY
-    if days_back:
-        query = f"{query} when:{days_back}d"
+    if lookback:
+        query = f"{query} when:{lookback}"
 
     params = {
         "q": query,
@@ -75,6 +74,21 @@ def build_rss_url() -> str:
         "ceid": "US:en",
     }
     return f"{GOOGLE_NEWS_RSS}?{urllib.parse.urlencode(params)}"
+
+
+def get_news_lookback(now: datetime | None = None) -> str:
+    current = (now or datetime.now(KST)).astimezone(KST)
+    base_lookback = os.getenv("GOOGLE_NEWS_LOOKBACK", "").strip()
+    if not base_lookback:
+        days_back = os.getenv("GOOGLE_NEWS_DAYS_BACK", "").strip()
+        if days_back:
+            base_lookback = f"{days_back}d"
+
+    quiet_hours_lookback = os.getenv("GOOGLE_NEWS_POST_QUIET_LOOKBACK", "").strip()
+    if current.hour == 5 and quiet_hours_lookback:
+        return quiet_hours_lookback
+
+    return base_lookback
 
 
 def fetch_feed() -> list[dict]:
@@ -145,6 +159,34 @@ def fetch_article_context(link: str) -> str:
 
     text = strip_html(raw_html)
     return text[:1500]
+
+
+def resolve_final_article_url(link: str) -> str:
+    if not link:
+        return ""
+
+    request = urllib.request.Request(
+        link,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.geturl() or link
+    except Exception:
+        return link
+
+
+def get_article_url(item: dict) -> str:
+    resolved = item.get("resolved_link", "").strip()
+    if resolved:
+        return resolved
+
+    original = item.get("link", "").strip()
+    resolved = resolve_final_article_url(original)
+    item["resolved_link"] = resolved or original
+    return item["resolved_link"]
 
 
 def has_openai_config() -> bool:
@@ -231,8 +273,8 @@ def build_batch_prompt(items: list[dict]) -> list[dict]:
                 "title": item["title"],
                 "source": item["source"],
                 "published": item["pub_date"],
-                "link": item["link"],
-                "article_context": fetch_article_context(item["link"]),
+                "link": get_article_url(item),
+                "article_context": fetch_article_context(get_article_url(item)),
             }
         )
     return prompt_items
@@ -331,7 +373,10 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
 
 def format_separator(now: datetime | None = None) -> str:
     stamp = (now or datetime.now(KST)).astimezone(KST).strftime("%Y-%m-%d %H:%M")
-    return f"=============== {stamp} ==============="
+    return (
+        "<b>한국 방산 뉴스 알림</b>\n"
+        f"<b>기준시각:</b> {stamp} (KST)"
+    )
 
 
 def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
@@ -339,7 +384,12 @@ def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
     return 0 <= current.hour < 5
 
 
-def format_item(item: dict, brief: dict[str, str] | None = None) -> str:
+def format_item(
+    item: dict,
+    brief: dict[str, str] | None = None,
+    index: int | None = None,
+    total: int | None = None,
+) -> str:
     published = item["pub_date"]
     if published:
         try:
@@ -351,9 +401,12 @@ def format_item(item: dict, brief: dict[str, str] | None = None) -> str:
     translated_title = (brief or {}).get("translated_title", "")
     summary_ko = (brief or {}).get("summary_ko", "")
 
-    lines = [
-        f"Title (Original): {item['title']}",
-    ]
+    prefix = ""
+    if index is not None and total is not None:
+        prefix = f"[{index}/{total}] "
+
+    escaped_title = html.escape(item["title"])
+    lines = [f"{prefix}<b>{escaped_title}</b>"]
     if translated_title:
         lines.append(f"Title (Korean): {translated_title}")
     if item["source"]:
@@ -362,7 +415,7 @@ def format_item(item: dict, brief: dict[str, str] | None = None) -> str:
         lines.append(f"Published: {published}")
     if summary_ko:
         lines.append(f"Summary (KO): {summary_ko}")
-    lines.append(f"Link: {item['link']}")
+    lines.append(f"Link: {get_article_url(item)}")
     return "\n".join(lines)
 
 
@@ -378,6 +431,7 @@ def send_telegram_message(text: str) -> None:
             "chat_id": chat_id,
             "text": text,
             "disable_web_page_preview": "true",
+            "parse_mode": "HTML",
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -420,8 +474,16 @@ def run_once() -> int:
 
         if new_items:
             send_telegram_message(format_separator())
-        for item in new_items:
-            send_telegram_message(format_item(item, briefs_by_id.get(item["id"])))
+        total_items = len(new_items)
+        for index, item in enumerate(new_items, start=1):
+            send_telegram_message(
+                format_item(
+                    item,
+                    briefs_by_id.get(item["id"]),
+                    index=index,
+                    total=total_items,
+                )
+            )
             seen_ids_list.append(item["id"])
             seen_ids.add(item["id"])
         new_count = len(new_items)
