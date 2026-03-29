@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 BASE_QUERY = (
@@ -22,6 +23,7 @@ BASE_QUERY = (
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 OPENAI_RESPONSES_API = "https://api.openai.com/v1/responses"
 STATE_PATH = Path(__file__).with_name("state.json")
+KST = ZoneInfo("Asia/Seoul")
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -328,8 +330,13 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
 
 
 def format_separator(now: datetime | None = None) -> str:
-    stamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M")
+    stamp = (now or datetime.now(KST)).astimezone(KST).strftime("%Y-%m-%d %H:%M")
     return f"=============== {stamp} ==============="
+
+
+def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
+    current = (now or datetime.now(KST)).astimezone(KST)
+    return 0 <= current.hour < 5
 
 
 def format_item(item: dict, brief: dict[str, str] | None = None) -> str:
@@ -384,6 +391,10 @@ def send_telegram_message(text: str) -> None:
 
 
 def run_once() -> int:
+    if should_skip_for_quiet_hours():
+        print("Skipped check during quiet hours (Asia/Seoul 00:00-04:59).", flush=True)
+        return 0
+
     state = load_state()
     seen_ids_list = state.get("seen_ids", [])
     seen_ids = set(seen_ids_list)
@@ -405,14 +416,7 @@ def run_once() -> int:
             try:
                 briefs_by_id = generate_korean_briefs(new_items)
             except Exception as exc:
-                if os.getenv("SHOW_AI_ERRORS_IN_MESSAGE", "true").lower() == "true":
-                    briefs_by_id = {
-                        item["id"]: {
-                            "translated_title": "",
-                            "summary_ko": f"AI 요약 생성 실패: {exc}",
-                        }
-                        for item in new_items
-                    }
+                print(f"AI summary skipped: {exc}", file=sys.stderr, flush=True)
 
         if new_items:
             send_telegram_message(format_separator())

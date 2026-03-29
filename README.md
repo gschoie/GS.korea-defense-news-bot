@@ -13,6 +13,7 @@ This project checks Google News RSS for the following query and sends new matche
 - Pushes only new matches to your Telegram chat
 - Adds a timestamp separator for each update batch
 - Optionally includes Korean headline translation and a short Korean summary
+- Skips checks during quiet hours in Korea time from 00:00 to 04:59
 - Runs once per hour by default
 
 ## Files
@@ -69,4 +70,5 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 - The bot batches multiple articles into a single OpenAI translation/summary request to reduce rate-limit errors.
 - If OpenAI returns `429 Too Many Requests`, the bot retries automatically with exponential backoff.
 - You can tune retry behavior with `OPENAI_MAX_RETRIES` and `OPENAI_RETRY_BASE_SECONDS`.
+- If OpenAI translation/summary fails, the bot falls back to the original headline/link without showing the AI error in Telegram.
 - If `OPENAI_API_KEY` is blank, the bot still works and sends the original headline/link without AI-generated Korean text.
