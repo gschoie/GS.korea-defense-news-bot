@@ -379,6 +379,17 @@ def format_separator(now: datetime | None = None) -> str:
     )
 
 
+def format_no_updates_message(now: datetime | None = None) -> str:
+    current = (now or datetime.now(KST)).astimezone(KST)
+    stamp = current.strftime("%Y-%m-%d %H:%M")
+    lookback = get_news_lookback(current) or "1h"
+    return (
+        "<b>뉴스 체크 결과</b>\n"
+        f"<b>기준시각:</b> {stamp} (KST)\n"
+        f"{lookback} 동안 신규 기사가 없습니다."
+    )
+
+
 def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
     current = (now or datetime.now(KST)).astimezone(KST)
     return 0 <= current.hour < 5
@@ -464,6 +475,7 @@ def run_once() -> int:
         for item in items:
             seen_ids.add(item["id"])
         new_count = 0
+        send_telegram_message(format_no_updates_message())
     else:
         briefs_by_id: dict[str, dict[str, str]] = {}
         if new_items and os.getenv("INCLUDE_KOREAN_SUMMARY", "true").lower() == "true":
@@ -474,18 +486,20 @@ def run_once() -> int:
 
         if new_items:
             send_telegram_message(format_separator())
-        total_items = len(new_items)
-        for index, item in enumerate(new_items, start=1):
-            send_telegram_message(
-                format_item(
-                    item,
-                    briefs_by_id.get(item["id"]),
-                    index=index,
-                    total=total_items,
+            total_items = len(new_items)
+            for index, item in enumerate(new_items, start=1):
+                send_telegram_message(
+                    format_item(
+                        item,
+                        briefs_by_id.get(item["id"]),
+                        index=index,
+                        total=total_items,
+                    )
                 )
-            )
-            seen_ids_list.append(item["id"])
-            seen_ids.add(item["id"])
+                seen_ids_list.append(item["id"])
+                seen_ids.add(item["id"])
+        else:
+            send_telegram_message(format_no_updates_message())
         new_count = len(new_items)
 
     if first_run and not seen_ids_list:
