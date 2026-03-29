@@ -27,7 +27,7 @@ jobs:
           RUN_MODE: once
           SEND_EXISTING_ON_FIRST_RUN: false
           INCLUDE_KOREAN_SUMMARY: true
-          GOOGLE_NEWS_DAYS_BACK: 3
+          GOOGLE_NEWS_DAYS_BACK: 1
           SHOW_AI_ERRORS_IN_MESSAGE: true
           OPENAI_MAX_RETRIES: 5
           OPENAI_RETRY_BASE_SECONDS: 10
