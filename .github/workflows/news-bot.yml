@@ -36,15 +36,17 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.2
           RUN_MODE: once
-          SEND_EXISTING_ON_FIRST_RUN: false
+          SEND_EXISTING_ON_FIRST_RUN: true
           INCLUDE_KOREAN_SUMMARY: true
           GOOGLE_NEWS_DAYS_BACK: 1
           SHOW_AI_ERRORS_IN_MESSAGE: false
           OPENAI_MAX_RETRIES: 5
           OPENAI_RETRY_BASE_SECONDS: 10
+          DISABLE_STATE: true
         run: python news_telegram_bot.py --once
 
       - name: Commit updated state
+        if: false
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
