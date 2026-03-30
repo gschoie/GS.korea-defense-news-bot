@@ -1,12 +1,14 @@
-import json
+# TEST 2026-03-30
+
 import html
+import json
 import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -40,9 +42,7 @@ def load_dotenv(dotenv_path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def load_state() -> dict:
@@ -61,21 +61,6 @@ def save_state(state: dict) -> None:
     )
 
 
-def build_rss_url() -> str:
-    lookback = get_news_lookback()
-    query = BASE_QUERY
-    if lookback:
-        query = f"{query} when:{lookback}"
-
-    params = {
-        "q": query,
-        "hl": "en-US",
-        "gl": "US",
-        "ceid": "US:en",
-    }
-    return f"{GOOGLE_NEWS_RSS}?{urllib.parse.urlencode(params)}"
-
-
 def get_news_lookback(now: datetime | None = None) -> str:
     current = (now or datetime.now(KST)).astimezone(KST)
     base_lookback = os.getenv("GOOGLE_NEWS_LOOKBACK", "").strip()
@@ -91,12 +76,25 @@ def get_news_lookback(now: datetime | None = None) -> str:
     return base_lookback
 
 
+def build_rss_url() -> str:
+    query = BASE_QUERY
+    lookback = get_news_lookback()
+    if lookback:
+        query = f"{query} when:{lookback}"
+
+    params = {
+        "q": query,
+        "hl": "en-US",
+        "gl": "US",
+        "ceid": "US:en",
+    }
+    return f"{GOOGLE_NEWS_RSS}?{urllib.parse.urlencode(params)}"
+
+
 def fetch_feed() -> list[dict]:
     request = urllib.request.Request(
         build_rss_url(),
-        headers={
-            "User-Agent": "Mozilla/5.0",
-        },
+        headers={"User-Agent": "Mozilla/5.0"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         xml_bytes = response.read()
@@ -136,9 +134,7 @@ def fetch_article_context(link: str) -> str:
 
     request = urllib.request.Request(
         link,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-        },
+        headers={"User-Agent": "Mozilla/5.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -157,8 +153,7 @@ def fetch_article_context(link: str) -> str:
             if description:
                 return description[:1500]
 
-    text = strip_html(raw_html)
-    return text[:1500]
+    return strip_html(raw_html)[:1500]
 
 
 def resolve_final_article_url(link: str) -> str:
@@ -167,9 +162,7 @@ def resolve_final_article_url(link: str) -> str:
 
     request = urllib.request.Request(
         link,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-        },
+        headers={"User-Agent": "Mozilla/5.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -267,14 +260,15 @@ def openai_request(body: dict) -> dict:
 def build_batch_prompt(items: list[dict]) -> list[dict]:
     prompt_items = []
     for item in items:
+        article_url = get_article_url(item)
         prompt_items.append(
             {
                 "id": item["id"],
                 "title": item["title"],
                 "source": item["source"],
                 "published": item["pub_date"],
-                "link": get_article_url(item),
-                "article_context": fetch_article_context(get_article_url(item)),
+                "link": article_url,
+                "article_context": fetch_article_context(article_url),
             }
         )
     return prompt_items
@@ -353,15 +347,13 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
         },
     }
     payload = openai_request(body)
-
     output_text = extract_output_text(payload)
     if not output_text:
         raise RuntimeError("OpenAI response did not include usable text output")
 
     parsed = json.loads(output_text)
-    briefs = parsed.get("briefs", [])
     results = dict(empty_result)
-    for brief in briefs:
+    for brief in parsed.get("briefs", []):
         brief_id = str(brief.get("id", "")).strip()
         if brief_id and brief_id in results:
             results[brief_id] = {
@@ -412,21 +404,19 @@ def format_item(
     translated_title = (brief or {}).get("translated_title", "")
     summary_ko = (brief or {}).get("summary_ko", "")
 
-    prefix = ""
-    if index is not None and total is not None:
-        prefix = f"[{index}/{total}] "
-
+    prefix = f"[{index}/{total}] " if index is not None and total is not None else ""
     escaped_title = html.escape(item["title"])
+
     lines = [f"{prefix}<b>{escaped_title}</b>"]
     if translated_title:
-        lines.append(f"Title (Korean): {translated_title}")
+        lines.append(f"Title (Korean): {html.escape(translated_title)}")
     if item["source"]:
-        lines.append(f"Source: {item['source']}")
+        lines.append(f"Source: {html.escape(item['source'])}")
     if published:
         lines.append(f"Published: {published}")
     if summary_ko:
-        lines.append(f"Summary (KO): {summary_ko}")
-    lines.append(f"Link: {get_article_url(item)}")
+        lines.append(f"Summary (KO): {html.escape(summary_ko)}")
+    lines.append(f"Link: {html.escape(get_article_url(item))}")
     return "\n".join(lines)
 
 
@@ -455,6 +445,15 @@ def send_telegram_message(text: str) -> None:
         response.read()
 
 
+def parse_date_for_sort(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return parsedate_to_datetime(value).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def run_once() -> int:
     if should_skip_for_quiet_hours():
         print("Skipped check during quiet hours (Asia/Seoul 00:00-04:59).", flush=True)
@@ -467,9 +466,7 @@ def run_once() -> int:
     first_run = not seen_ids_list
 
     new_items = [item for item in items if item["id"] not in seen_ids]
-    new_items.sort(
-        key=lambda item: parse_date_for_sort(item["pub_date"]),
-    )
+    new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
 
     if first_run and os.getenv("SEND_EXISTING_ON_FIRST_RUN", "false").lower() != "true":
         for item in items:
@@ -500,6 +497,7 @@ def run_once() -> int:
                 seen_ids.add(item["id"])
         else:
             send_telegram_message(format_no_updates_message())
+
         new_count = len(new_items)
 
     if first_run and not seen_ids_list:
@@ -511,20 +509,8 @@ def run_once() -> int:
     state["last_new_count"] = new_count
     save_state(state)
 
-    print(
-        f"Checked {len(items)} item(s), sent {new_count} new message(s).",
-        flush=True,
-    )
+    print(f"Checked {len(items)} item(s), sent {new_count} new message(s).", flush=True)
     return new_count
-
-
-def parse_date_for_sort(value: str) -> float:
-    if not value:
-        return 0.0
-    try:
-        return parsedate_to_datetime(value).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
 
 
 def sleep_until_next_hour() -> None:
