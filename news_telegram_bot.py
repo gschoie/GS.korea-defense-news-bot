@@ -15,12 +15,76 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 
-BASE_QUERY = (
+WEAPONS_QUERY = (
     '"KOREA" AND ('
     '"K9" OR "K2" OR "K239" OR "MLRS" OR "M-SAM" OR "L-SAM" OR "KTSSM" OR "KGGB" '
     'OR "FA-50" OR "T-50" OR "KF-21" OR "LAH" OR "Surion" OR "KUH"'
     ")"
 )
+COMPANY_QUERY = (
+    '"Hanwha Aerospace" OR "Hanwha Ocean" OR "Hanwha Systems" OR "Hyundai Rotem" '
+    'OR "LIG Nex1" OR "Korea Aerospace Industries" '
+    'OR "Cheongung" OR "Chunmoo" OR "Redback" OR "KSS-III"'
+)
+ARABIC_QUERY = '"كوريا الجنوبية" AND (دفاع OR أسلحة OR صواريخ OR مدفعية OR دبابات)'
+
+# (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는 중동 매체 기사를 놓친다
+FEEDS = [
+    (WEAPONS_QUERY, "en-US", "US", "US:en"),
+    (WEAPONS_QUERY, "en-GB", "GB", "GB:en"),
+    (WEAPONS_QUERY, "en-AE", "AE", "AE:en"),
+    (COMPANY_QUERY, "en-US", "US", "US:en"),
+    (COMPANY_QUERY, "en-GB", "GB", "GB:en"),
+    (COMPANY_QUERY, "en-AE", "AE", "AE:en"),
+    (ARABIC_QUERY, "ar", "SA", "SA:ar"),
+    (ARABIC_QUERY, "ar", "EG", "EG:ar"),
+]
+
+# 한국 언론사 영어보도 제외 (source 이름 소문자 부분일치)
+EXCLUDED_SOURCE_KEYWORDS = [
+    "korea herald",
+    "korea times",
+    "korea joongang",
+    "joongang",
+    "yonhap",
+    "chosun",
+    "dong-a",
+    "donga",
+    "hankyoreh",
+    "hankyung",
+    "korea economic daily",
+    "ked global",
+    "maeil",
+    "pulse by",
+    "businesskorea",
+    "business korea",
+    "aju business",
+    "aju press",
+    "arirang",
+    "kbs world",
+    "korea bizwire",
+    "korea.net",
+    "korea pro",
+    "korea daily",
+    "newsis",
+    "koreatechtoday",
+    "seoul economic",
+    "sedaily",
+    "thelec",
+    "the elec",
+    "etnews",
+    "asia economic",
+    "asiae",
+    "ajunews",
+    "money today",
+    "newspim",
+    "edaily",
+    "heraldcorp",
+    "hankook ilbo",
+    "kyunghyang",
+    "segye",
+    "chosunbiz",
+]
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 OPENAI_RESPONSES_API = "https://api.openai.com/v1/responses"
 STATE_PATH = Path(__file__).with_name("state.json")
@@ -76,24 +140,35 @@ def get_news_lookback(now: datetime | None = None) -> str:
     return base_lookback
 
 
-def build_rss_url() -> str:
-    query = BASE_QUERY
+def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
     lookback = get_news_lookback()
     if lookback:
         query = f"{query} when:{lookback}"
 
     params = {
         "q": query,
-        "hl": "en-US",
-        "gl": "US",
-        "ceid": "US:en",
+        "hl": hl,
+        "gl": gl,
+        "ceid": ceid,
     }
     return f"{GOOGLE_NEWS_RSS}?{urllib.parse.urlencode(params)}"
 
 
-def fetch_feed() -> list[dict]:
+def is_excluded_source(item: dict) -> bool:
+    if os.getenv("EXCLUDE_KOREAN_MEDIA", "true").lower() != "true":
+        return False
+    # 한글 매체명/제목 = 국내 보도 → 해외 보도만 남긴다
+    if re.search(r"[가-힣]", f"{item.get('source', '')} {item.get('title', '')}"):
+        return True
+    source = item.get("source", "").lower()
+    if not source:
+        return False
+    return any(keyword in source for keyword in EXCLUDED_SOURCE_KEYWORDS)
+
+
+def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
     request = urllib.request.Request(
-        build_rss_url(),
+        build_rss_url(query, hl, gl, ceid),
         headers={"User-Agent": "Mozilla/5.0"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -117,6 +192,28 @@ def fetch_feed() -> list[dict]:
             }
         )
     return items
+
+
+def fetch_feed() -> list[dict]:
+    merged: list[dict] = []
+    seen_keys: set[str] = set()
+    for query, hl, gl, ceid in FEEDS:
+        try:
+            feed_items = fetch_single_feed(query, hl, gl, ceid)
+        except Exception as exc:
+            print(f"Feed fetch failed ({ceid}): {exc}", file=sys.stderr, flush=True)
+            continue
+        for item in feed_items:
+            # 같은 기사가 에디션마다 다른 guid로 잡힐 수 있어 제목+매체로도 dedupe
+            dedupe_keys = [
+                item["id"],
+                f"{item['title'].strip().lower()}|{item['source'].strip().lower()}",
+            ]
+            if any(key in seen_keys for key in dedupe_keys):
+                continue
+            seen_keys.update(dedupe_keys)
+            merged.append(item)
+    return merged
 
 
 def strip_html(raw_html: str) -> str:
@@ -279,6 +376,7 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
         item["id"]: {
             "translated_title": "",
             "summary_ko": "",
+            "relevance": None,
         }
         for item in items
     }
@@ -295,14 +393,19 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
                     {
                         "type": "input_text",
                         "text": (
-                            "You translate English news headlines into Korean and write short Korean summaries. "
+                            "You translate news headlines (any language) into Korean and write short Korean summaries. "
                             "Return valid JSON only. "
                             "The output must be an object with one key named briefs. "
                             "briefs must be an array of objects. "
-                            "Each object must contain id, translated_title, and summary_ko. "
+                            "Each object must contain id, translated_title, summary_ko, and relevance. "
                             "translated_title must be a natural Korean translation of the original title. "
                             "summary_ko must be 2 short Korean sentences grounded only in the provided information. "
                             "If context is thin, say that the available article snippet is limited. "
+                            "relevance must be an integer from 0 to 10 scoring how relevant the article is to "
+                            "South Korea's defense industry: Korean weapons systems, arms exports and deals, "
+                            "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, etc.), or military "
+                            "cooperation involving South Korea. Articles merely mentioning Korea in passing, "
+                            "about North Korea only, or about unrelated industries must score 3 or lower. "
                             "Preserve every input id exactly once."
                         ),
                     }
@@ -334,8 +437,14 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
                                     "id": {"type": "string"},
                                     "translated_title": {"type": "string"},
                                     "summary_ko": {"type": "string"},
+                                    "relevance": {"type": "integer"},
                                 },
-                                "required": ["id", "translated_title", "summary_ko"],
+                                "required": [
+                                    "id",
+                                    "translated_title",
+                                    "summary_ko",
+                                    "relevance",
+                                ],
                                 "additionalProperties": False,
                             },
                         }
@@ -356,9 +465,14 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
     for brief in parsed.get("briefs", []):
         brief_id = str(brief.get("id", "")).strip()
         if brief_id and brief_id in results:
+            try:
+                relevance = int(brief.get("relevance"))
+            except (TypeError, ValueError):
+                relevance = None
             results[brief_id] = {
                 "translated_title": str(brief.get("translated_title", "")).strip(),
                 "summary_ko": str(brief.get("summary_ko", "")).strip(),
+                "relevance": relevance,
             }
     return results
 
@@ -465,7 +579,17 @@ def run_once() -> int:
     items = fetch_feed()
     first_run = not seen_ids_list
 
-    new_items = [item for item in items if item["id"] not in seen_ids]
+    excluded_count = 0
+    new_items = []
+    for item in items:
+        if item["id"] in seen_ids:
+            continue
+        if is_excluded_source(item):
+            excluded_count += 1
+            seen_ids_list.append(item["id"])
+            seen_ids.add(item["id"])
+            continue
+        new_items.append(item)
     new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
 
     if first_run and os.getenv("SEND_EXISTING_ON_FIRST_RUN", "false").lower() != "true":
@@ -481,10 +605,43 @@ def run_once() -> int:
             except Exception as exc:
                 print(f"AI summary skipped: {exc}", file=sys.stderr, flush=True)
 
-        if new_items:
-            send_telegram_message(format_separator())
-            total_items = len(new_items)
-            for index, item in enumerate(new_items, start=1):
+        # AI 관련성 점수가 기준 미달이면 발송 없이 seen 처리
+        min_relevance = int(os.getenv("MIN_RELEVANCE", "4"))
+        low_relevance_count = 0
+        send_items = []
+        for item in new_items:
+            relevance = (briefs_by_id.get(item["id"]) or {}).get("relevance")
+            if isinstance(relevance, int) and relevance < min_relevance:
+                low_relevance_count += 1
+                seen_ids_list.append(item["id"])
+                seen_ids.add(item["id"])
+                continue
+            send_items.append(item)
+
+        # 쿼리 확대 직후 폭주 방지: 최신 N건만 발송, 나머지는 seen 처리
+        max_per_run = int(os.getenv("MAX_ITEMS_PER_RUN", "25"))
+        overflow_count = 0
+        if len(send_items) > max_per_run:
+            overflow_count = len(send_items) - max_per_run
+            for item in send_items[:-max_per_run]:
+                seen_ids_list.append(item["id"])
+                seen_ids.add(item["id"])
+            send_items = send_items[-max_per_run:]
+
+        if send_items:
+            notes = []
+            if low_relevance_count:
+                notes.append(f"관련성 낮음 제외: {low_relevance_count}건")
+            if excluded_count:
+                notes.append(f"한국언론 제외: {excluded_count}건")
+            if overflow_count:
+                notes.append(f"건수 초과 생략: {overflow_count}건")
+            separator = format_separator()
+            if notes:
+                separator += "\n" + " · ".join(notes)
+            send_telegram_message(separator)
+            total_items = len(send_items)
+            for index, item in enumerate(send_items, start=1):
                 send_telegram_message(
                     format_item(
                         item,
@@ -495,21 +652,27 @@ def run_once() -> int:
                 )
                 seen_ids_list.append(item["id"])
                 seen_ids.add(item["id"])
+                if total_items > 3:
+                    time.sleep(1.1)
         else:
             send_telegram_message(format_no_updates_message())
 
-        new_count = len(new_items)
+        new_count = len(send_items)
 
     if first_run and not seen_ids_list:
         seen_ids_list = [item["id"] for item in items]
 
-    state["seen_ids"] = seen_ids_list[-500:]
+    state["seen_ids"] = seen_ids_list[-2000:]
     state["last_checked_at"] = datetime.now(timezone.utc).isoformat()
     state["last_result_count"] = len(items)
     state["last_new_count"] = new_count
     save_state(state)
 
-    print(f"Checked {len(items)} item(s), sent {new_count} new message(s).", flush=True)
+    print(
+        f"Checked {len(items)} item(s), sent {new_count} new message(s), "
+        f"excluded {excluded_count} Korean-media item(s).",
+        flush=True,
+    )
     return new_count
 
 

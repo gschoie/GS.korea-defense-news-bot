@@ -1,17 +1,27 @@
 # Google News to Telegram Bot
 
-This project checks Google News RSS for the following query and sends new matches to Telegram:
+This project checks Google News RSS across multiple queries and editions and sends new matches to Telegram:
 
 ```text
-"KOREA" AND ("K9" OR "K2" OR "K239" OR "MLRS" OR "M-SAM" OR "L-SAM" OR "KTSSM" OR "KGGB" OR "FA-50" OR "T-50" OR "KF-21" OR "LAH" OR "Surion" OR "KUH")
+Weapons query (US / UK / UAE English editions):
+  "KOREA" AND ("K9" OR "K2" OR "K239" OR "MLRS" OR "M-SAM" OR "L-SAM" OR "KTSSM" OR "KGGB" OR "FA-50" OR "T-50" OR "KF-21" OR "LAH" OR "Surion" OR "KUH")
+
+Company / nickname query (US / UK / UAE English editions):
+  "Hanwha Aerospace" OR "Hanwha Ocean" OR "Hanwha Systems" OR "Hyundai Rotem" OR "LIG Nex1" OR "Korea Aerospace Industries" OR "Cheongung" OR "Chunmoo" OR "Redback" OR "KSS-III"
+
+Arabic query (Saudi / Egypt Arabic editions):
+  "كوريا الجنوبية" AND (دفاع OR أسلحة OR صواريخ OR مدفعية OR دبابات)
 ```
 
 ## What It Does
 
-- Pulls Google News RSS search results
+- Pulls Google News RSS search results from 8 feeds (3 queries x multiple editions) and dedupes them
 - Filters out articles that were already sent
+- Excludes Korean domestic media (English-language outlets like Korea Herald / Yonhap / Aju Press, plus any article with Hangul in title or source) — toggle with `EXCLUDE_KOREAN_MEDIA`
+- Scores each article's relevance to the Korean defense industry with AI (0-10) and silently drops items below `MIN_RELEVANCE` (default 4)
+- Caps each run at `MAX_ITEMS_PER_RUN` messages (default 25, newest first) to avoid flooding after query changes
 - Pushes only new matches to your Telegram chat
-- Adds a timestamp separator for each update batch
+- Adds a timestamp separator for each update batch (with counts of excluded/skipped items)
 - Optionally includes Korean headline translation and a short Korean summary
 - Skips checks during quiet hours in Korea time from 00:00 to 04:59
 - Runs once per hour by default
