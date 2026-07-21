@@ -26,7 +26,15 @@ COMPANY_QUERY = (
     'OR "LIG Nex1" OR "Korea Aerospace Industries" '
     'OR "Cheongung" OR "Chunmoo" OR "Redback" OR "KSS-III"'
 )
-ARABIC_QUERY = '"كوريا الجنوبية" AND (دفاع OR أسلحة OR صواريخ OR مدفعية OR دبابات)'
+# 일반 단어(دفاع=방어/수비, صواريخ=미사일)는 축구·중동정치 기사까지 잡으므로
+# 방산업 특정 표현·회사/무기 아랍어 표기·라틴 제식명만 사용한다
+ARABIC_QUERY = (
+    '"كوريا الجنوبية" AND ('
+    '"الصناعات الدفاعية" OR "صفقة أسلحة" OR "صفقة دفاعية" OR "صادرات الأسلحة" '
+    'OR "التعاون الدفاعي" OR هانوا OR هانفا OR "هيونداي روتيم" OR تشونمو OR تشيونغونغ '
+    'OR "K9" OR "KF-21" OR "FA-50"'
+    ")"
+)
 
 # (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는 중동 매체 기사를 놓친다
 FEEDS = [
@@ -47,6 +55,7 @@ EXCLUDED_SOURCE_KEYWORDS = [
     "korea joongang",
     "joongang",
     "yonhap",
+    "يونهاب",  # 연합뉴스 아랍어 서비스
     "chosun",
     "dong-a",
     "donga",
@@ -84,6 +93,11 @@ EXCLUDED_SOURCE_KEYWORDS = [
     "kyunghyang",
     "segye",
     "chosunbiz",
+]
+# 원 매체가 아닌 재발행·기계번역·집계 사이트 (도메인 정확일치 또는 서브도메인)
+EXCLUDED_DOMAINS = [
+    "vietnam.vn",
+    "khlaasa.net",
 ]
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 OPENAI_RESPONSES_API = "https://api.openai.com/v1/responses"
@@ -166,6 +180,21 @@ def is_excluded_source(item: dict) -> bool:
     return any(keyword in source for keyword in EXCLUDED_SOURCE_KEYWORDS)
 
 
+def is_blocked_domain(item: dict) -> bool:
+    host = urllib.parse.urlparse(item.get("source_url", "")).netloc.lower()
+    if not host:
+        return False
+    extra = [
+        domain.strip().lower()
+        for domain in os.getenv("EXTRA_EXCLUDED_DOMAINS", "").split(",")
+        if domain.strip()
+    ]
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in EXCLUDED_DOMAINS + extra
+    )
+
+
 def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
     request = urllib.request.Request(
         build_rss_url(query, hl, gl, ceid),
@@ -181,7 +210,9 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
         title = item.findtext("title", default="(no title)")
         link = item.findtext("link", default="")
         pub_date = item.findtext("pubDate", default="")
-        source = item.findtext("source", default="")
+        source_el = item.find("source")
+        source = (source_el.text or "") if source_el is not None else ""
+        source_url = source_el.get("url", "") if source_el is not None else ""
         items.append(
             {
                 "id": guid or link or title,
@@ -189,6 +220,7 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
                 "link": link,
                 "pub_date": pub_date,
                 "source": source,
+                "source_url": source_url,
             }
         )
     return items
@@ -372,6 +404,8 @@ def build_batch_prompt(items: list[dict]) -> list[dict]:
 
 
 def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
+    # 한 번에 전부 처리하다 실패하면 전량 무점수 발송(폴백)이 되므로
+    # 청크로 나눠 실패를 청크 단위로 격리한다
     empty_result = {
         item["id"]: {
             "translated_title": "",
@@ -383,6 +417,30 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
     if not items or not has_openai_config():
         return empty_result
 
+    results = dict(empty_result)
+    batch_size = max(1, int(os.getenv("OPENAI_BATCH_SIZE", "10")))
+    for start in range(0, len(items), batch_size):
+        chunk = items[start : start + batch_size]
+        try:
+            results.update(generate_korean_briefs_chunk(chunk))
+        except Exception as exc:
+            print(
+                f"AI brief chunk failed (items {start + 1}-{start + len(chunk)}): {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+    return results
+
+
+def generate_korean_briefs_chunk(items: list[dict]) -> dict[str, dict[str, str]]:
+    empty_result = {
+        item["id"]: {
+            "translated_title": "",
+            "summary_ko": "",
+            "relevance": None,
+        }
+        for item in items
+    }
     prompt = build_batch_prompt(items)
     body = {
         "model": os.getenv("OPENAI_MODEL", "gpt-5.2"),
@@ -406,6 +464,10 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
                             "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, etc.), or military "
                             "cooperation involving South Korea. Articles merely mentioning Korea in passing, "
                             "about North Korea only, or about unrelated industries must score 3 or lower. "
+                            "Score 0-2 for: sports coverage (in football, 'defense'/دفاع refers to gameplay, "
+                            "not the military), culture, UNESCO heritage, tourism, entertainment; and articles "
+                            "about other countries' politics or conflicts (Iran, Israel, the US, etc.) where "
+                            "South Korea appears only in passing (e.g., frozen funds, trade statistics). "
                             "Preserve every input id exactly once."
                         ),
                     }
@@ -580,12 +642,22 @@ def run_once() -> int:
     first_run = not seen_ids_list
 
     excluded_count = 0
+    blocked_domain_count = 0
     new_items = []
     for item in items:
         if item["id"] in seen_ids:
             continue
         if is_excluded_source(item):
             excluded_count += 1
+            seen_ids_list.append(item["id"])
+            seen_ids.add(item["id"])
+            continue
+        if is_blocked_domain(item):
+            blocked_domain_count += 1
+            print(
+                f"Blocked domain: {item['source_url']} — {item['title'][:80]}",
+                flush=True,
+            )
             seen_ids_list.append(item["id"])
             seen_ids.add(item["id"])
             continue
@@ -613,6 +685,11 @@ def run_once() -> int:
             relevance = (briefs_by_id.get(item["id"]) or {}).get("relevance")
             if isinstance(relevance, int) and relevance < min_relevance:
                 low_relevance_count += 1
+                print(
+                    f"Dropped (relevance {relevance}): "
+                    f"{item['source']} — {item['title'][:80]}",
+                    flush=True,
+                )
                 seen_ids_list.append(item["id"])
                 seen_ids.add(item["id"])
                 continue
@@ -634,6 +711,8 @@ def run_once() -> int:
                 notes.append(f"관련성 낮음 제외: {low_relevance_count}건")
             if excluded_count:
                 notes.append(f"한국언론 제외: {excluded_count}건")
+            if blocked_domain_count:
+                notes.append(f"집계사이트 제외: {blocked_domain_count}건")
             if overflow_count:
                 notes.append(f"건수 초과 생략: {overflow_count}건")
             separator = format_separator()
