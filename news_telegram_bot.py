@@ -24,7 +24,8 @@ WEAPONS_QUERY = (
 COMPANY_QUERY = (
     '"Hanwha Aerospace" OR "Hanwha Ocean" OR "Hanwha Systems" OR "Hyundai Rotem" '
     'OR "LIG Nex1" OR "Korea Aerospace Industries" '
-    'OR "Cheongung" OR "Chunmoo" OR "Redback" OR "KSS-III"'
+    # Redback은 호주에서 독거미·경마 이름으로 흔해 방산 문맥을 함께 요구한다
+    'OR "Cheongung" OR "Chunmoo" OR (Redback AND (Hanwha OR IFV OR army)) OR "KSS-III"'
 )
 # 일반 단어(دفاع=방어/수비, صواريخ=미사일)는 축구·중동정치 기사까지 잡으므로
 # 방산업 특정 표현·회사/무기 아랍어 표기·라틴 제식명만 사용한다
@@ -429,6 +430,21 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
                 file=sys.stderr,
                 flush=True,
             )
+
+    # 실패 청크·누락 id 재시도 한 번
+    unscored = [
+        item for item in items if results[item["id"]]["relevance"] is None
+    ]
+    for start in range(0, len(unscored), batch_size):
+        chunk = unscored[start : start + batch_size]
+        try:
+            results.update(generate_korean_briefs_chunk(chunk))
+        except Exception as exc:
+            print(
+                f"AI brief retry failed ({len(chunk)} item(s)): {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     return results
 
 
@@ -664,6 +680,7 @@ def run_once() -> int:
         new_items.append(item)
     new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
 
+    deferred_count = 0
     if first_run and os.getenv("SEND_EXISTING_ON_FIRST_RUN", "false").lower() != "true":
         for item in items:
             seen_ids.add(item["id"])
@@ -677,8 +694,14 @@ def run_once() -> int:
             except Exception as exc:
                 print(f"AI summary skipped: {exc}", file=sys.stderr, flush=True)
 
-        # AI 관련성 점수가 기준 미달이면 발송 없이 seen 처리
+        # AI 관련성 점수가 기준 미달이면 발송 없이 seen 처리.
+        # AI 실패로 무점수인 기사는 발송하지 않고 seen 처리도 하지 않는다
+        # → 다음 회차(1시간 뒤)에 다시 새 기사로 잡혀 재채점됨
         min_relevance = int(os.getenv("MIN_RELEVANCE", "4"))
+        ai_filter_active = (
+            os.getenv("INCLUDE_KOREAN_SUMMARY", "true").lower() == "true"
+            and has_openai_config()
+        )
         low_relevance_count = 0
         send_items = []
         for item in new_items:
@@ -692,6 +715,14 @@ def run_once() -> int:
                 )
                 seen_ids_list.append(item["id"])
                 seen_ids.add(item["id"])
+                continue
+            if relevance is None and ai_filter_active:
+                deferred_count += 1
+                print(
+                    f"Deferred (no AI score): "
+                    f"{item['source']} — {item['title'][:80]}",
+                    flush=True,
+                )
                 continue
             send_items.append(item)
 
@@ -749,7 +780,8 @@ def run_once() -> int:
 
     print(
         f"Checked {len(items)} item(s), sent {new_count} new message(s), "
-        f"excluded {excluded_count} Korean-media item(s).",
+        f"excluded {excluded_count} Korean-media item(s), "
+        f"deferred {deferred_count} unscored item(s).",
         flush=True,
     )
     return new_count
