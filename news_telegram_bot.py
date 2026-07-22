@@ -181,6 +181,16 @@ def is_excluded_source(item: dict) -> bool:
     return any(keyword in source for keyword in EXCLUDED_SOURCE_KEYWORDS)
 
 
+# 아랍어·키릴·CJK 문자가 제목에 있으면 비영어 기사로 분류 (한글은 앞단에서 이미 제외됨)
+NON_LATIN_PATTERN = re.compile(
+    r"[Ѐ-ӿ؀-ۿݐ-ݿ一-鿿぀-ヿ]"
+)
+
+
+def is_english_item(item: dict) -> bool:
+    return not NON_LATIN_PATTERN.search(item.get("title", ""))
+
+
 def is_blocked_domain(item: dict) -> bool:
     host = urllib.parse.urlparse(item.get("source_url", "")).netloc.lower()
     if not host:
@@ -751,19 +761,31 @@ def run_once() -> int:
                 separator += "\n" + " · ".join(notes)
             send_telegram_message(separator)
             total_items = len(send_items)
-            for index, item in enumerate(send_items, start=1):
+            # 영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            sections = [
+                ("영어 뉴스", [i for i in send_items if is_english_item(i)]),
+                ("비영어 뉴스", [i for i in send_items if not is_english_item(i)]),
+            ]
+            for section_title, section_items in sections:
+                if not section_items:
+                    continue
                 send_telegram_message(
-                    format_item(
-                        item,
-                        briefs_by_id.get(item["id"]),
-                        index=index,
-                        total=total_items,
-                    )
+                    f"<b>[{section_title}]</b> {len(section_items)}건"
                 )
-                seen_ids_list.append(item["id"])
-                seen_ids.add(item["id"])
-                if total_items > 3:
-                    time.sleep(1.1)
+                section_total = len(section_items)
+                for index, item in enumerate(section_items, start=1):
+                    send_telegram_message(
+                        format_item(
+                            item,
+                            briefs_by_id.get(item["id"]),
+                            index=index,
+                            total=section_total,
+                        )
+                    )
+                    seen_ids_list.append(item["id"])
+                    seen_ids.add(item["id"])
+                    if total_items > 3:
+                        time.sleep(1.1)
         else:
             send_telegram_message(format_no_updates_message())
 
