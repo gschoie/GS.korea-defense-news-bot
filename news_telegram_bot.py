@@ -365,6 +365,10 @@ def parse_retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
     return None
 
 
+class QuotaExhaustedError(RuntimeError):
+    """OpenAI 크레딧/쿼터 소진 — 재시도로 회복 불가, 결제 필요."""
+
+
 def openai_request(body: dict) -> dict:
     max_attempts = int(os.getenv("OPENAI_MAX_RETRIES", "5"))
     base_delay = float(os.getenv("OPENAI_RETRY_BASE_SECONDS", "10"))
@@ -383,8 +387,13 @@ def openai_request(body: dict) -> dict:
             with urllib.request.urlopen(request, timeout=60) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="ignore")
+            # 크레딧 소진은 429여도 기다린다고 회복되지 않는다 — 즉시 중단
+            if exc.code == 429 and "insufficient_quota" in error_body:
+                raise QuotaExhaustedError(
+                    "OpenAI quota exhausted (check billing at platform.openai.com)"
+                ) from exc
             if exc.code != 429 or attempt >= max_attempts:
-                error_body = exc.read().decode("utf-8", errors="ignore")
                 raise RuntimeError(
                     f"OpenAI API error {exc.code}: {error_body or exc.reason}"
                 ) from exc
@@ -434,6 +443,8 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
         chunk = items[start : start + batch_size]
         try:
             results.update(generate_korean_briefs_chunk(chunk))
+        except QuotaExhaustedError:
+            raise  # 남은 청크·재시도 전부 무의미 — 바로 올려보낸다
         except Exception as exc:
             print(
                 f"AI brief chunk failed (items {start + 1}-{start + len(chunk)}): {exc}",
@@ -449,6 +460,8 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
         chunk = unscored[start : start + batch_size]
         try:
             results.update(generate_korean_briefs_chunk(chunk))
+        except QuotaExhaustedError:
+            raise
         except Exception as exc:
             print(
                 f"AI brief retry failed ({len(chunk)} item(s)): {exc}",
@@ -698,9 +711,13 @@ def run_once() -> int:
         send_telegram_message(format_no_updates_message())
     else:
         briefs_by_id: dict[str, dict[str, str]] = {}
+        quota_exhausted = False
         if new_items and os.getenv("INCLUDE_KOREAN_SUMMARY", "true").lower() == "true":
             try:
                 briefs_by_id = generate_korean_briefs(new_items)
+            except QuotaExhaustedError as exc:
+                quota_exhausted = True
+                print(f"AI scoring unavailable: {exc}", file=sys.stderr, flush=True)
             except Exception as exc:
                 print(f"AI summary skipped: {exc}", file=sys.stderr, flush=True)
 
@@ -748,6 +765,8 @@ def run_once() -> int:
 
         if send_items:
             notes = []
+            if deferred_count:
+                notes.append(f"AI 채점 보류: {deferred_count}건")
             if low_relevance_count:
                 notes.append(f"관련성 낮음 제외: {low_relevance_count}건")
             if excluded_count:
@@ -787,7 +806,21 @@ def run_once() -> int:
                     if total_items > 3:
                         time.sleep(1.1)
         else:
-            send_telegram_message(format_no_updates_message())
+            if deferred_count:
+                # '신규 기사 없음'이 아니라 채점을 못 한 것 — 정확히 알린다
+                stamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+                status = (
+                    "<b>뉴스 체크 결과</b>\n"
+                    f"<b>기준시각:</b> {stamp} (KST)\n"
+                    f"AI 채점 실패로 {deferred_count}건 발송 보류 — 다음 회차에 재시도합니다."
+                )
+                if quota_exhausted:
+                    status += (
+                        "\n⚠️ OpenAI 크레딧 소진 — platform.openai.com 결제 확인 필요."
+                    )
+                send_telegram_message(status)
+            else:
+                send_telegram_message(format_no_updates_message())
 
         new_count = len(send_items)
 
