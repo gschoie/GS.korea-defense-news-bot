@@ -102,6 +102,30 @@ EXCLUDED_DOMAINS = [
 ]
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 OPENAI_RESPONSES_API = "https://api.openai.com/v1/responses"
+GEMINI_API_TEMPLATE = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+
+BRIEF_SYSTEM_PROMPT = (
+    "You translate news headlines (any language) into Korean and write short Korean summaries. "
+    "Return valid JSON only. "
+    "The output must be an object with one key named briefs. "
+    "briefs must be an array of objects. "
+    "Each object must contain id, translated_title, summary_ko, and relevance. "
+    "translated_title must be a natural Korean translation of the original title. "
+    "summary_ko must be 2 short Korean sentences grounded only in the provided information. "
+    "If context is thin, say that the available article snippet is limited. "
+    "relevance must be an integer from 0 to 10 scoring how relevant the article is to "
+    "South Korea's defense industry: Korean weapons systems, arms exports and deals, "
+    "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, etc.), or military "
+    "cooperation involving South Korea. Articles merely mentioning Korea in passing, "
+    "about North Korea only, or about unrelated industries must score 3 or lower. "
+    "Score 0-2 for: sports coverage (in football, 'defense'/دفاع refers to gameplay, "
+    "not the military), culture, UNESCO heritage, tourism, entertainment; and articles "
+    "about other countries' politics or conflicts (Iran, Israel, the US, etc.) where "
+    "South Korea appears only in passing (e.g., frozen funds, trade statistics). "
+    "Preserve every input id exactly once."
+)
 STATE_PATH = Path(__file__).with_name("state.json")
 KST = timezone(timedelta(hours=9), name="KST")
 
@@ -326,6 +350,15 @@ def has_openai_config() -> bool:
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 
+def ai_provider() -> str | None:
+    # Gemini 키가 있으면 무료 티어인 Gemini 우선, 없으면 OpenAI
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return "gemini"
+    if has_openai_config():
+        return "openai"
+    return None
+
+
 def extract_output_text(payload: dict) -> str:
     direct_text = payload.get("output_text")
     if isinstance(direct_text, str) and direct_text.strip():
@@ -406,6 +439,91 @@ def openai_request(body: dict) -> dict:
     raise RuntimeError("OpenAI API retry loop exited unexpectedly")
 
 
+def gemini_request(system_text: str, user_text: str) -> str:
+    """Gemini generateContent 호출 → 응답 텍스트(JSON 문자열) 반환."""
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    body = {
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "briefs": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "id": {"type": "STRING"},
+                                "translated_title": {"type": "STRING"},
+                                "summary_ko": {"type": "STRING"},
+                                "relevance": {"type": "INTEGER"},
+                            },
+                            "required": [
+                                "id",
+                                "translated_title",
+                                "summary_ko",
+                                "relevance",
+                            ],
+                        },
+                    }
+                },
+                "required": ["briefs"],
+            },
+        },
+    }
+
+    max_attempts = int(os.getenv("GEMINI_MAX_RETRIES", "4"))
+    base_delay = float(os.getenv("GEMINI_RETRY_BASE_SECONDS", "15"))
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(
+            GEMINI_API_TEMPLATE.format(model=model),
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "x-goog-api-key": env("GEMINI_API_KEY"),
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            parts = []
+            for candidate in payload.get("candidates", []):
+                for part in candidate.get("content", {}).get("parts", []):
+                    text_value = part.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        parts.append(text_value.strip())
+            output_text = "\n".join(parts).strip()
+            if not output_text:
+                raise RuntimeError("Gemini response did not include usable text output")
+            return output_text
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 429:
+                # 일일 무료 쿼터 소진은 오늘 안에 회복 안 됨 — 즉시 중단.
+                # 분당 rate limit이면 잠시 쉬고 재시도
+                if "PerDay" in error_body or "per day" in error_body.lower():
+                    raise QuotaExhaustedError(
+                        "Gemini daily free-tier quota exhausted"
+                    ) from exc
+                if attempt < max_attempts:
+                    delay_match = re.search(r'"retryDelay":\s*"(\d+)', error_body)
+                    delay = (
+                        float(delay_match.group(1)) + 1.0
+                        if delay_match
+                        else base_delay * (2 ** (attempt - 1))
+                    )
+                    time.sleep(delay)
+                    continue
+            raise RuntimeError(
+                f"Gemini API error {exc.code}: {error_body or exc.reason}"
+            ) from exc
+
+    raise RuntimeError("Gemini API retry loop exited unexpectedly")
+
+
 def build_batch_prompt(items: list[dict]) -> list[dict]:
     prompt_items = []
     for item in items:
@@ -434,7 +552,7 @@ def generate_korean_briefs(items: list[dict]) -> dict[str, dict[str, str]]:
         }
         for item in items
     }
-    if not items or not has_openai_config():
+    if not items or ai_provider() is None:
         return empty_result
 
     results = dict(empty_result)
@@ -481,85 +599,61 @@ def generate_korean_briefs_chunk(items: list[dict]) -> dict[str, dict[str, str]]
         for item in items
     }
     prompt = build_batch_prompt(items)
-    body = {
-        "model": os.getenv("OPENAI_MODEL", "gpt-5.2"),
-        "input": [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "You translate news headlines (any language) into Korean and write short Korean summaries. "
-                            "Return valid JSON only. "
-                            "The output must be an object with one key named briefs. "
-                            "briefs must be an array of objects. "
-                            "Each object must contain id, translated_title, summary_ko, and relevance. "
-                            "translated_title must be a natural Korean translation of the original title. "
-                            "summary_ko must be 2 short Korean sentences grounded only in the provided information. "
-                            "If context is thin, say that the available article snippet is limited. "
-                            "relevance must be an integer from 0 to 10 scoring how relevant the article is to "
-                            "South Korea's defense industry: Korean weapons systems, arms exports and deals, "
-                            "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, etc.), or military "
-                            "cooperation involving South Korea. Articles merely mentioning Korea in passing, "
-                            "about North Korea only, or about unrelated industries must score 3 or lower. "
-                            "Score 0-2 for: sports coverage (in football, 'defense'/دفاع refers to gameplay, "
-                            "not the military), culture, UNESCO heritage, tourism, entertainment; and articles "
-                            "about other countries' politics or conflicts (Iran, Israel, the US, etc.) where "
-                            "South Korea appears only in passing (e.g., frozen funds, trade statistics). "
-                            "Preserve every input id exactly once."
-                        ),
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": json.dumps(prompt, ensure_ascii=False),
-                    }
-                ],
-            },
-        ],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "news_briefs",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "briefs": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string"},
-                                    "translated_title": {"type": "string"},
-                                    "summary_ko": {"type": "string"},
-                                    "relevance": {"type": "integer"},
-                                },
-                                "required": [
-                                    "id",
-                                    "translated_title",
-                                    "summary_ko",
-                                    "relevance",
-                                ],
-                                "additionalProperties": False,
-                            },
-                        }
-                    },
-                    "required": ["briefs"],
-                    "additionalProperties": False,
+    user_text = json.dumps(prompt, ensure_ascii=False)
+
+    if ai_provider() == "gemini":
+        output_text = gemini_request(BRIEF_SYSTEM_PROMPT, user_text)
+    else:
+        body = {
+            "model": os.getenv("OPENAI_MODEL", "gpt-5.2"),
+            "input": [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": BRIEF_SYSTEM_PROMPT}],
                 },
-            }
-        },
-    }
-    payload = openai_request(body)
-    output_text = extract_output_text(payload)
-    if not output_text:
-        raise RuntimeError("OpenAI response did not include usable text output")
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_text}],
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "news_briefs",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "briefs": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "translated_title": {"type": "string"},
+                                        "summary_ko": {"type": "string"},
+                                        "relevance": {"type": "integer"},
+                                    },
+                                    "required": [
+                                        "id",
+                                        "translated_title",
+                                        "summary_ko",
+                                        "relevance",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                            }
+                        },
+                        "required": ["briefs"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+        }
+        payload = openai_request(body)
+        output_text = extract_output_text(payload)
+        if not output_text:
+            raise RuntimeError("OpenAI response did not include usable text output")
 
     parsed = json.loads(output_text)
     results = dict(empty_result)
@@ -727,7 +821,7 @@ def run_once() -> int:
         min_relevance = int(os.getenv("MIN_RELEVANCE", "4"))
         ai_filter_active = (
             os.getenv("INCLUDE_KOREAN_SUMMARY", "true").lower() == "true"
-            and has_openai_config()
+            and ai_provider() is not None
         )
         low_relevance_count = 0
         send_items = []
@@ -815,9 +909,14 @@ def run_once() -> int:
                     f"AI 채점 실패로 {deferred_count}건 발송 보류 — 다음 회차에 재시도합니다."
                 )
                 if quota_exhausted:
-                    status += (
-                        "\n⚠️ OpenAI 크레딧 소진 — platform.openai.com 결제 확인 필요."
-                    )
+                    if ai_provider() == "gemini":
+                        status += (
+                            "\n⚠️ Gemini 일일 무료 한도 초과 — 내일 자동 회복됩니다."
+                        )
+                    else:
+                        status += (
+                            "\n⚠️ OpenAI 크레딧 소진 — platform.openai.com 결제 확인 필요."
+                        )
                 send_telegram_message(status)
             else:
                 send_telegram_message(format_no_updates_message())
