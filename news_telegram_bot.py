@@ -774,11 +774,28 @@ def run_once() -> int:
     items = fetch_feed()
     first_run = not seen_ids_list
 
+    # 구글뉴스가 when: 필터를 무시하고 수개월 전 기사를 섞어줄 때가 있다
+    # → 발행일이 컷오프보다 오래된 기사는 발송 없이 seen 처리
+    max_age_hours = float(os.getenv("MAX_ITEM_AGE_HOURS", "72"))
+    age_cutoff_ts = time.time() - max_age_hours * 3600
+
     excluded_count = 0
     blocked_domain_count = 0
+    stale_count = 0
     new_items = []
     for item in items:
         if item["id"] in seen_ids:
+            continue
+        pub_ts = parse_date_for_sort(item["pub_date"])
+        if pub_ts and pub_ts < age_cutoff_ts:
+            stale_count += 1
+            print(
+                f"Stale (older than {max_age_hours:.0f}h): "
+                f"{item['pub_date']} — {item['title'][:80]}",
+                flush=True,
+            )
+            seen_ids_list.append(item["id"])
+            seen_ids.add(item["id"])
             continue
         if is_excluded_source(item):
             excluded_count += 1
@@ -867,6 +884,8 @@ def run_once() -> int:
                 notes.append(f"한국언론 제외: {excluded_count}건")
             if blocked_domain_count:
                 notes.append(f"집계사이트 제외: {blocked_domain_count}건")
+            if stale_count:
+                notes.append(f"오래된 기사 제외: {stale_count}건")
             if overflow_count:
                 notes.append(f"건수 초과 생략: {overflow_count}건")
             separator = format_separator()
