@@ -2,6 +2,11 @@ name: News Bot
 
 on:
   workflow_dispatch:
+    inputs:
+      ignore_quiet_hours:
+        description: "Run even during KST quiet hours (00:00-04:59)"
+        type: boolean
+        default: false
   schedule:
     - cron: "17 * * * *"
 
@@ -42,6 +47,7 @@ jobs:
           INCLUDE_KOREAN_SUMMARY: true
           GOOGLE_NEWS_LOOKBACK: 12h
           GOOGLE_NEWS_POST_QUIET_LOOKBACK: 24h
+          IGNORE_QUIET_HOURS: ${{ inputs.ignore_quiet_hours }}
           EXCLUDE_KOREAN_MEDIA: true
           MIN_RELEVANCE: 4
           MAX_ITEMS_PER_RUN: 30

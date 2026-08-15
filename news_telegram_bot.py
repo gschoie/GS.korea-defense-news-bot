@@ -886,6 +886,9 @@ def format_no_updates_message(now: datetime | None = None) -> str:
 
 
 def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
+    # 수동 테스트 실행이 조용시간에 막히지 않도록 하는 우회 스위치
+    if os.getenv("IGNORE_QUIET_HOURS", "false").lower() == "true":
+        return False
     current = (now or datetime.now(KST)).astimezone(KST)
     return 0 <= current.hour < 5
 
