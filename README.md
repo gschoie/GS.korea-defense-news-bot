@@ -10,18 +10,20 @@ shipbuilding, buyer-country procurement, export totals with no product name).
 
 | Query | Covers | Editions |
 |---|---|---|
-| `AIR_QUERY` | KF-21, FA-50/TA-50, KAI, Surion/KUH-1; T-50 / LAH / KF-16 / MUAV behind a Korea guard | US, GB, IN, PH, MY |
-| `LAND_QUERY` | K239 Chunmoo, Hyundai Rotem, K2 Black Panther, K9 Thunder, AS9 Huntsman, AS21 Redback, Homar-K, K808/Tigon; bare K2 / K9 / K21 / K10 / K30 behind a Korea guard | US, GB, AU |
+| `AIR_QUERY` | KF-21, FA-50/TA-50, KAI, Surion/KUH-1; T-50 / F-50 / KAI / LAH / KF-16 / MUAV and competitor programs (KAAN, GCAP, Hürjet, TF-X) behind a Korea guard | US, GB, IN, PH, MY |
+| `LAND_QUERY` | K239 Chunmoo, Hyundai Rotem, K2 Black Panther, K9 Thunder, K9 Vajra, AS9 Huntsman, AS21 Redback, Homar-K, K808; bare K2 / K9 / K21 / K10 / K30 / Tigon behind a Korea guard | US, GB, AU |
 | `MISSILE_QUERY` | L-SAM, M-SAM/Cheongung, KTSSM, KGGB, Hyunmoo, LIG Nex1, Haeseong, Bigung, Shingung; Chiron / Sky Dragon / Poniard behind a Korea guard | US, GB |
-| `NAVAL_QUERY` | KDDX, KSS-III/Jangbogo, Hanwha Ocean, Philly Shipyard, MASGA, HD Hyundai Heavy; submarine / frigate / destroyer / Aegis / naval MRO behind a Korea guard | US, GB, CA |
+| `NAVAL_QUERY` | KDDX, KSS-III/Jangbogo, Hanwha Ocean, Philly Shipyard, MASGA, HD/Hyundai Heavy, Hanwha+Austal; submarine / frigate / destroyer / Aegis / naval MRO behind a Korea guard | US, GB, CA |
 | `COMPANY_QUERY` | Hanwha Aerospace/Systems/Defense, Poongsan, SNT Dynamics/Motiv, Firstec, DAPA, ADD | US, GB, AE |
 | `EXPORT_QUERY` | Export totals, arms deals, defense cooperation and policy stories that name no product | US, GB, AE |
-| `COUNTRY_QUERY` | Buyer-country reporting (Poland, Romania, Egypt, Peru, Philippines, Vietnam, Malaysia, Norway, Finland, Morocco, Saudi, UAE, India, Canada, Australia, Indonesia) | US, IN |
+| `COUNTRY_QUERY` | Buyer-country reporting (Poland, Romania, Egypt, Peru, Philippines, Vietnam, Malaysia, Norway, Finland, Morocco, Saudi, UAE, India, Canada, Australia, Indonesia, Iraq, Thailand, Uzbekistan, Estonia) | US, IN |
 | `ARABIC_QUERY` | Defense-industry-specific Arabic phrasing plus Korean company/weapon transliterations | SA, EG |
 | `POLISH_QUERY` | `Korea Południowa` + K2 / K9 / FA-50 / Hanwha / Rotem / Homar-K / Borsuk | PL |
 | `INDONESIAN_QUERY` | `Korea Selatan` + KF-21 / FA-50 / T-50 / Hanwha / industri pertahanan / alutsista | ID |
 | `VIETNAMESE_QUERY` | `Hàn Quốc` + K9 / KF-21 / FA-50 / Hanwha / công nghiệp quốc phòng | VN |
 | `TURKISH_QUERY` | `Güney Kore` + KF-21 / FA-50 / K9 / K2 / Hanwha / savunma sanayi | TR |
+| `SPANISH_QUERY` | `Corea del Sur` + KSS-III / submarino / Hanwha / FA-50 / KF-21 / K9 / industria de defensa | PE (es-419) |
+| `ROMANIAN_QUERY` | `Coreea de Sud` + K9 / K2 / Hanwha / Hyundai Rotem / industria de apărare / obuziere | RO |
 | `KOREAN_COLUMN_QUERY` | Korean defense-specialist column series (see below) | KR |
 
 ### Korean defense columns (exception channel)
@@ -41,7 +43,7 @@ Chiron = the Bugatti, Redback = the spider) are wrapped in a
 
 ## What It Does
 
-- Pulls Google News RSS search results from 27 feeds (12 queries x their editions) and dedupes them
+- Pulls Google News RSS search results from 30 feeds (15 queries x their editions, including the Korean column channel) and dedupes them
 - Filters out articles that were already sent
 - Excludes Korean domestic media (English-language outlets like Korea Herald / Yonhap / Aju Press, plus any article with Hangul in title or source) — toggle with `EXCLUDE_KOREAN_MEDIA`
 - Drops obvious non-defense context before spending AI calls: titles matching football / K-pop / K2-the-mountain / police-dog patterns with no defense signal alongside them (bare "defense" does not count as a signal, since it means gameplay in football coverage)

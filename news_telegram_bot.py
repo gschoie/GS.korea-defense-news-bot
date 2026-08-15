@@ -20,17 +20,25 @@ from pathlib import Path
 # → 영역별 쿼리로 쪼개고, 일반 단어와 겹치는 토큰만 한국 문맥을 함께 요구한다.
 KOREA_GUARD = "KOREA OR KOREAN OR SEOUL"
 
-# 항공: KF-21/FA-50 계열. T-50·LAH·KF-16은 타국 기사와 겹쳐 한국 문맥을 요구
+# 항공: KF-21/FA-50 계열. T-50·LAH·KF-16은 타국 기사와 겹쳐 한국 문맥을 요구.
+# KAAN·GCAP·Hurjet은 경쟁 기종 — KF-21 언급 없는 비교·수주전 기사를 잡기 위한 것으로,
+# 단독으로는 튀르키예·영국 국내 기사 홍수라 한국 문맥 가드 필수.
+# F-50은 단좌형 명칭(차량·카메라 모델명과 겹침), KAI는 인명·약어 중복이 많아 역시 가드.
 AIR_QUERY = (
     '"KF-21" OR "Boramae" OR "FA-50" OR "TA-50" OR "Golden Eagle jet" '
     'OR "Korea Aerospace Industries" OR "Surion" OR "KUH-1" OR "KF-21EX" '
-    f'OR (({KOREA_GUARD}) AND ("T-50" OR "LAH" OR "KF-16" OR "light armed helicopter" OR "MUAV"))'
+    f'OR (({KOREA_GUARD}) AND ("T-50" OR "F-50" OR "KAI" OR "LAH" OR "KF-16" '
+    'OR "light armed helicopter" OR "MUAV" '
+    'OR "KAAN" OR "GCAP" OR "Hurjet" OR "Hürjet" OR "TF-X"))'
 )
-# 지상: K2/K9/K21은 산(K2)·군견(K9)과 겹쳐 한국 문맥 또는 완전한 이름을 요구
+# 지상: K2/K9/K21은 산(K2)·군견(K9)과 겹쳐 한국 문맥 또는 완전한 이름을 요구.
+# K9 Vajra는 인도 현지 표기(제목에 Korea가 없는 경우 다수).
+# Tigon은 사자·호랑이 교잡종 동물명과 겹쳐 가드 구간으로
 LAND_QUERY = (
     '"K239" OR "Chunmoo" OR "Cheonmoo" OR "Hyundai Rotem" OR "K2 Black Panther" '
-    'OR "K9 Thunder" OR "AS9 Huntsman" OR "AS21 Redback" OR "Homar-K" OR "K808" OR "Tigon" '
-    f'OR (({KOREA_GUARD}) AND ("K2 tank" OR "K9 howitzer" OR "K21" OR "K10" OR "K30" OR Redback))'
+    'OR "K9 Thunder" OR "K9 Vajra" OR "AS9 Huntsman" OR "AS21 Redback" OR "Homar-K" OR "K808" '
+    f'OR (({KOREA_GUARD}) AND ("K2 tank" OR "K9 howitzer" OR "K21" OR "K10" OR "K30" '
+    'OR Redback OR Tigon))'
 )
 # 유도무기·방공. Chiron(부가티)·Poniard는 동음이의어라 한국 문맥을 요구
 MISSILE_QUERY = (
@@ -41,7 +49,9 @@ MISSILE_QUERY = (
 # 함정·조선: KDDX, 잠수함, MASGA·필리조선소·미 해군 MRO — 현행 로직이 통째로 놓치던 영역
 NAVAL_QUERY = (
     '"KDDX" OR "KSS-III" OR "Jangbogo" OR "Hanwha Ocean" OR "Philly Shipyard" OR "MASGA" '
-    'OR "HD Hyundai Heavy" OR "Hanwha Philly" '
+    'OR "HD Hyundai Heavy" OR "Hanwha Philly" OR "Hyundai Heavy Industries" '
+    # Austal 인수전 기사는 Hanwha Ocean 풀네임 없이 Hanwha만 쓰는 경우가 많다
+    "OR (Hanwha AND Austal) "
     f'OR (({KOREA_GUARD}) AND (submarine OR frigate OR destroyer OR corvette OR shipbuilder '
     'OR "naval MRO" OR "Aegis" OR "shipbuilding deal"))'
 )
@@ -61,15 +71,18 @@ EXPORT_QUERY = (
     'OR "weapons exports" OR "K-defense" OR "military aid package"'
     ")"
 )
-# 상대국 관점 보도 — 한국 매체보다 현지 매체가 먼저 쓰는 경우가 많다
+# 상대국 관점 보도 — 한국 매체보다 현지 매체가 먼저 쓰는 경우가 많다.
+# 단독 arms(arms race/up in arms)·tanks(think tanks)는 오검색이 커서 구문으로 좁힌다
 COUNTRY_QUERY = (
     '("South Korea" OR "Korean") AND ('
     'Poland OR Romania OR Egypt OR Peru OR Philippines OR Vietnam OR Malaysia '
     'OR Norway OR Finland OR Morocco OR "Saudi Arabia" OR "United Arab Emirates" '
-    'OR India OR Canada OR Australia OR Indonesia'
+    'OR India OR Canada OR Australia OR Indonesia '
+    'OR Iraq OR Thailand OR Uzbekistan OR Estonia'
     ") AND ("
-    '"defense contract" OR "defence contract" OR arms OR howitzer OR "fighter jet" '
-    'OR tanks OR missile OR frigate OR submarine OR artillery'
+    '"defense contract" OR "defence contract" OR "arms deal" OR "arms sale" '
+    'OR "arms export" OR howitzer OR "fighter jet" '
+    'OR "battle tank" OR missile OR frigate OR submarine OR artillery'
     ")"
 )
 # 국내 방산 전문기자 연재 — 한국언론 제외 필터의 예외 채널.
@@ -119,6 +132,19 @@ TURKISH_QUERY = (
     '"KF-21" OR "FA-50" OR "K9" OR "K2" OR Hanwha OR "savunma sanayi"'
     ")"
 )
+# 페루 잠수함·자주포, 중남미 FA-50 검토국 — 스페인어 현지 보도가 영어보다 빠르다
+SPANISH_QUERY = (
+    '"Corea del Sur" AND ('
+    '"KSS-III" OR submarino OR Hanwha OR "FA-50" OR "KF-21" OR "K9" '
+    'OR "industria de defensa" OR "exportación de armas"'
+    ")"
+)
+# 루마니아: K9·레드백·천궁 대량 구매국
+ROMANIAN_QUERY = (
+    '"Coreea de Sud" AND ('
+    '"K9" OR "K2" OR Hanwha OR "Hyundai Rotem" OR "industria de apărare" OR obuziere'
+    ")"
+)
 
 # (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는
 # 중동·동남아·유럽 현지 매체 기사를 놓친다. 영어판을 앞에 두어
@@ -151,6 +177,8 @@ FEEDS = [
     (INDONESIAN_QUERY, "id", "ID", "ID:id"),
     (VIETNAMESE_QUERY, "vi", "VN", "VN:vi"),
     (TURKISH_QUERY, "tr", "TR", "TR:tr"),
+    (SPANISH_QUERY, "es-419", "PE", "PE:es-419"),
+    (ROMANIAN_QUERY, "ro", "RO", "RO:ro"),
 ]
 # 국내 방산 칼럼 피드 — 한국언론 제외·AI 관련성 컷을 우회하는 별도 채널
 COLUMN_FEEDS = [
