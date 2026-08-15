@@ -72,6 +72,22 @@ COUNTRY_QUERY = (
     'OR tanks OR missile OR frigate OR submarine OR artillery'
     ")"
 )
+# 국내 방산 전문기자 연재 — 한국언론 제외 필터의 예외 채널.
+# 연재물은 제목에 [밀리터리+] 같은 태그를 다는 관행이 있어
+# 쿼리는 넓게 잡고 제목 태그로 정밀 필터한다
+KOREAN_COLUMN_QUERY = (
+    '"밀리터리+" OR "밀리터리 인사이드" OR "무기인사이드" OR "이일우의 밀리터리" '
+    'OR "박수찬의 軍" OR "이철재의 밀담" OR "양낙규의 Defence" OR "양낙규의 디펜스" '
+    'OR "김관용의 軍界一學" OR "정충신의 밀리터리"'
+)
+# 제목 안의 연재 태그로 확정 — 쿼리가 물어온 무관 기사를 걸러낸다
+KOREAN_COLUMN_TITLE_PATTERN = re.compile(
+    r"\[(밀리터리\+|밀리터리 ?인사이드|(최현호의 ?)?무기 ?인사이드"
+    r"|이일우의 ?밀리터리 ?(talk|톡)?|박수찬의 ?軍|이철재의 ?밀담"
+    r"|양낙규의 ?(Defence|디펜스) ?(클럽|Club)?|김관용의 ?軍界一學"
+    r"|정충신의 ?밀리터리 ?(카페)?)\]"
+)
+
 # 일반 단어(دفاع=방어/수비, صواريخ=미사일)는 축구·중동정치 기사까지 잡으므로
 # 방산업 특정 표현·회사/무기 아랍어 표기·라틴 제식명만 사용한다
 ARABIC_QUERY = (
@@ -135,6 +151,10 @@ FEEDS = [
     (INDONESIAN_QUERY, "id", "ID", "ID:id"),
     (VIETNAMESE_QUERY, "vi", "VN", "VN:vi"),
     (TURKISH_QUERY, "tr", "TR", "TR:tr"),
+]
+# 국내 방산 칼럼 피드 — 한국언론 제외·AI 관련성 컷을 우회하는 별도 채널
+COLUMN_FEEDS = [
+    (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
 ]
 
 # 한국 언론사 영어보도 제외 (source 이름 소문자 부분일치)
@@ -292,6 +312,9 @@ def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
 
 
 def is_excluded_source(item: dict) -> bool:
+    # 방산 전문기자 연재는 국내 매체라도 통과시킨다
+    if item.get("is_column"):
+        return False
     if os.getenv("EXCLUDE_KOREAN_MEDIA", "true").lower() != "true":
         return False
     # 한글 매체명/제목 = 국내 보도 → 해외 보도만 남긴다
@@ -359,7 +382,9 @@ def is_blocked_domain(item: dict) -> bool:
     )
 
 
-def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
+def fetch_single_feed(
+    query: str, hl: str, gl: str, ceid: str, is_column: bool = False
+) -> list[dict]:
     request = urllib.request.Request(
         build_rss_url(query, hl, gl, ceid),
         headers={"User-Agent": "Mozilla/5.0"},
@@ -386,6 +411,7 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
                 "source": source,
                 "source_url": source_url,
                 "feed_lang": hl.split("-")[0].lower(),
+                "is_column": is_column,
             }
         )
     return items
@@ -394,12 +420,22 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
 def fetch_feed() -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
-    for query, hl, gl, ceid in FEEDS:
+    feed_specs = [(spec, False) for spec in FEEDS]
+    if os.getenv("INCLUDE_KOREAN_COLUMNS", "true").lower() == "true":
+        feed_specs += [(spec, True) for spec in COLUMN_FEEDS]
+    for (query, hl, gl, ceid), is_column in feed_specs:
         try:
-            feed_items = fetch_single_feed(query, hl, gl, ceid)
+            feed_items = fetch_single_feed(query, hl, gl, ceid, is_column=is_column)
         except Exception as exc:
             print(f"Feed fetch failed ({ceid}): {exc}", file=sys.stderr, flush=True)
             continue
+        if is_column:
+            # 쿼리는 넓게 잡았으므로 제목의 연재 태그로 확정한다
+            feed_items = [
+                item
+                for item in feed_items
+                if KOREAN_COLUMN_TITLE_PATTERN.search(item["title"])
+            ]
         for item in feed_items:
             # 같은 기사가 에디션마다 다른 guid로 잡힐 수 있어 제목+매체로도 dedupe
             dedupe_keys = [
@@ -847,7 +883,8 @@ def format_item(
     escaped_title = html.escape(item["title"])
 
     lines = [f"{prefix}<b>{escaped_title}</b>"]
-    if translated_title:
+    # 원제가 이미 한국어인 국내 칼럼에는 번역 제목이 무의미하다
+    if translated_title and item.get("feed_lang") != "ko":
         lines.append(f"Title (Korean): {html.escape(translated_title)}")
     if item["source"]:
         lines.append(f"Source: {html.escape(item['source'])}")
@@ -958,12 +995,16 @@ def run_once() -> int:
     # → 채점 대상 자체를 최신 N건으로 제한하고 나머지는 seen 처리
     max_to_score = int(os.getenv("MAX_ITEMS_TO_SCORE", "60"))
     unscored_overflow_count = 0
-    if len(new_items) > max_to_score:
-        unscored_overflow_count = len(new_items) - max_to_score
-        for item in new_items[:-max_to_score]:
+    # 칼럼은 반드시 발송해야 하므로 채점 한도 컷 대상에서 제외
+    scorable = [item for item in new_items if not item.get("is_column")]
+    if len(scorable) > max_to_score:
+        column_items = [item for item in new_items if item.get("is_column")]
+        unscored_overflow_count = len(scorable) - max_to_score
+        for item in scorable[:-max_to_score]:
             seen_ids_list.append(item["id"])
             seen_ids.add(item["id"])
-        new_items = new_items[-max_to_score:]
+        new_items = column_items + scorable[-max_to_score:]
+        new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
         print(
             f"Skipped AI scoring for {unscored_overflow_count} older candidate(s) "
             f"(MAX_ITEMS_TO_SCORE={max_to_score}).",
@@ -999,6 +1040,10 @@ def run_once() -> int:
         low_relevance_count = 0
         send_items = []
         for item in new_items:
+            # 방산 전문 연재는 관련성 점수·채점 실패와 무관하게 반드시 발송
+            if item.get("is_column"):
+                send_items.append(item)
+                continue
             relevance = (briefs_by_id.get(item["id"]) or {}).get("relevance")
             if isinstance(relevance, int) and relevance < min_relevance:
                 low_relevance_count += 1
@@ -1053,10 +1098,13 @@ def run_once() -> int:
                 separator += "\n" + " · ".join(notes)
             send_telegram_message(separator)
             total_items = len(send_items)
-            # 영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            # 국내 칼럼/영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            column_items = [i for i in send_items if i.get("is_column")]
+            foreign_items = [i for i in send_items if not i.get("is_column")]
             sections = [
-                ("영어 뉴스", [i for i in send_items if is_english_item(i)]),
-                ("비영어 뉴스", [i for i in send_items if not is_english_item(i)]),
+                ("국내 방산 칼럼", column_items),
+                ("영어 뉴스", [i for i in foreign_items if is_english_item(i)]),
+                ("비영어 뉴스", [i for i in foreign_items if not is_english_item(i)]),
             ]
             for section_title, section_items in sections:
                 if not section_items:

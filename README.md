@@ -22,6 +22,17 @@ shipbuilding, buyer-country procurement, export totals with no product name).
 | `INDONESIAN_QUERY` | `Korea Selatan` + KF-21 / FA-50 / T-50 / Hanwha / industri pertahanan / alutsista | ID |
 | `VIETNAMESE_QUERY` | `Hàn Quốc` + K9 / KF-21 / FA-50 / Hanwha / công nghiệp quốc phòng | VN |
 | `TURKISH_QUERY` | `Güney Kore` + KF-21 / FA-50 / K9 / K2 / Hanwha / savunma sanayi | TR |
+| `KOREAN_COLUMN_QUERY` | Korean defense-specialist column series (see below) | KR |
+
+### Korean defense columns (exception channel)
+
+Korean domestic media is normally excluded, but defense-specialist column series are
+let through as a separate channel. They are matched by the series tag in the title
+(`[밀리터리+]`, `[밀리터리 인사이드]`, `[무기인사이드]`, `[이일우의 밀리터리 talk]`,
+`[박수찬의 軍]`, `[이철재의 밀담]`, `[양낙규의 디펜스클럽]`, `[김관용의 軍界一學]`,
+`[정충신의 밀리터리 카페]`), bypass the AI relevance cut and the scoring cap so they are
+always delivered, and arrive in their own `[국내 방산 칼럼]` Telegram section.
+Toggle with `INCLUDE_KOREAN_COLUMNS` (default `true`).
 
 Tokens that collide with everyday words (K2 = the mountain, K9 = police dogs,
 Chiron = the Bugatti, Redback = the spider) are wrapped in a
