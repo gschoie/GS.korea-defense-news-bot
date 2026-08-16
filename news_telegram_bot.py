@@ -15,18 +15,92 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 
-WEAPONS_QUERY = (
-    '"KOREA" AND ('
-    '"K9" OR "K2" OR "K239" OR "MLRS" OR "M-SAM" OR "L-SAM" OR "KTSSM" OR "KGGB" '
-    'OR "FA-50" OR "T-50" OR "KF-21" OR "LAH" OR "Surion" OR "KUH"'
-    ")"
+# 제식명 하나로는 잡히지 않는 기사가 많다 (KKMD가 다루는 외신 상당수가
+# 함정·정책·수출 총액 기사라 제품명이 본문에만 있거나 아예 없다).
+# → 영역별 쿼리로 쪼개고, 일반 단어와 겹치는 토큰만 한국 문맥을 함께 요구한다.
+KOREA_GUARD = "KOREA OR KOREAN OR SEOUL"
+
+# 항공: KF-21/FA-50 계열. T-50·LAH·KF-16은 타국 기사와 겹쳐 한국 문맥을 요구.
+# KAAN·GCAP·Hurjet은 경쟁 기종 — KF-21 언급 없는 비교·수주전 기사를 잡기 위한 것으로,
+# 단독으로는 튀르키예·영국 국내 기사 홍수라 한국 문맥 가드 필수.
+# F-50은 단좌형 명칭(차량·카메라 모델명과 겹침), KAI는 인명·약어 중복이 많아 역시 가드.
+AIR_QUERY = (
+    '"KF-21" OR "Boramae" OR "FA-50" OR "TA-50" OR "Golden Eagle jet" '
+    'OR "Korea Aerospace Industries" OR "Surion" OR "KUH-1" OR "KF-21EX" '
+    f'OR (({KOREA_GUARD}) AND ("T-50" OR "F-50" OR "KAI" OR "LAH" OR "KF-16" '
+    'OR "light armed helicopter" OR "MUAV" '
+    'OR "KAAN" OR "GCAP" OR "Hurjet" OR "Hürjet" OR "TF-X"))'
+)
+# 지상: K2/K9/K21은 산(K2)·군견(K9)과 겹쳐 한국 문맥 또는 완전한 이름을 요구.
+# K9 Vajra는 인도 현지 표기(제목에 Korea가 없는 경우 다수).
+# Tigon은 사자·호랑이 교잡종 동물명과 겹쳐 가드 구간으로
+LAND_QUERY = (
+    '"K239" OR "Chunmoo" OR "Cheonmoo" OR "Hyundai Rotem" OR "K2 Black Panther" '
+    'OR "K9 Thunder" OR "K9 Vajra" OR "AS9 Huntsman" OR "AS21 Redback" OR "Homar-K" OR "K808" '
+    f'OR (({KOREA_GUARD}) AND ("K2 tank" OR "K9 howitzer" OR "K21" OR "K10" OR "K30" '
+    'OR Redback OR Tigon))'
+)
+# 유도무기·방공. Chiron(부가티)·Poniard는 동음이의어라 한국 문맥을 요구
+MISSILE_QUERY = (
+    '"L-SAM" OR "M-SAM" OR "Cheongung" OR "KM-SAM" OR "KTSSM" OR "KGGB" OR "Hyunmoo" '
+    'OR "LIG Nex1" OR "Haeseong" OR "SSM-700K" OR "Bigung" OR "Shingung" '
+    f'OR (({KOREA_GUARD}) AND ("Chiron" OR "Sky Dragon" OR "Poniard" OR "hypersonic missile"))'
+)
+# 함정·조선: KDDX, 잠수함, MASGA·필리조선소·미 해군 MRO — 현행 로직이 통째로 놓치던 영역
+NAVAL_QUERY = (
+    '"KDDX" OR "KSS-III" OR "Jangbogo" OR "Hanwha Ocean" OR "Philly Shipyard" OR "MASGA" '
+    'OR "HD Hyundai Heavy" OR "Hanwha Philly" OR "Hyundai Heavy Industries" '
+    # Austal 인수전 기사는 Hanwha Ocean 풀네임 없이 Hanwha만 쓰는 경우가 많다
+    "OR (Hanwha AND Austal) "
+    f'OR (({KOREA_GUARD}) AND (submarine OR frigate OR destroyer OR corvette OR shipbuilder '
+    'OR "naval MRO" OR "Aegis" OR "shipbuilding deal"))'
 )
 COMPANY_QUERY = (
-    '"Hanwha Aerospace" OR "Hanwha Ocean" OR "Hanwha Systems" OR "Hyundai Rotem" '
-    'OR "LIG Nex1" OR "Korea Aerospace Industries" '
-    # Redback은 호주에서 독거미·경마 이름으로 흔해 방산 문맥을 함께 요구한다
-    'OR "Cheongung" OR "Chunmoo" OR (Redback AND (Hanwha OR IFV OR army)) OR "KSS-III"'
+    '"Hanwha Aerospace" OR "Hanwha Systems" OR "Hanwha Defense" OR "Hanwha Defence" '
+    'OR "Poongsan" OR "SNT Dynamics" OR "SNT Motiv" OR "Firstec" '
+    'OR "Defense Acquisition Program Administration" OR "Agency for Defense Development" '
+    f'OR (({KOREA_GUARD}) AND ("DAPA" OR "defense industry association" OR "ADEX"))'
 )
+# 제품명이 안 나오는 총론·정책 기사 (수출 총액, 방산 협력 MOU 등)
+EXPORT_QUERY = (
+    '("South Korea" OR "Korean" OR "Seoul") AND ('
+    '"arms export" OR "arms exports" OR "defense export" OR "defence export" '
+    'OR "arms deal" OR "defense deal" OR "defence deal" OR "arms sale" OR "arms sales" '
+    'OR "defense industry" OR "defence industry" OR "defense cooperation" '
+    'OR "defence cooperation" OR "defense contract" OR "defence contract" '
+    'OR "weapons exports" OR "K-defense" OR "military aid package"'
+    ")"
+)
+# 상대국 관점 보도 — 한국 매체보다 현지 매체가 먼저 쓰는 경우가 많다.
+# 단독 arms(arms race/up in arms)·tanks(think tanks)는 오검색이 커서 구문으로 좁힌다
+COUNTRY_QUERY = (
+    '("South Korea" OR "Korean") AND ('
+    'Poland OR Romania OR Egypt OR Peru OR Philippines OR Vietnam OR Malaysia '
+    'OR Norway OR Finland OR Morocco OR "Saudi Arabia" OR "United Arab Emirates" '
+    'OR India OR Canada OR Australia OR Indonesia '
+    'OR Iraq OR Thailand OR Uzbekistan OR Estonia'
+    ") AND ("
+    '"defense contract" OR "defence contract" OR "arms deal" OR "arms sale" '
+    'OR "arms export" OR howitzer OR "fighter jet" '
+    'OR "battle tank" OR missile OR frigate OR submarine OR artillery'
+    ")"
+)
+# 국내 방산 전문기자 연재 — 한국언론 제외 필터의 예외 채널.
+# 연재물은 제목에 [밀리터리+] 같은 태그를 다는 관행이 있어
+# 쿼리는 넓게 잡고 제목 태그로 정밀 필터한다
+KOREAN_COLUMN_QUERY = (
+    '"밀리터리+" OR "밀리터리 인사이드" OR "무기인사이드" OR "이일우의 밀리터리" '
+    'OR "박수찬의 軍" OR "이철재의 밀담" OR "양낙규의 Defence" OR "양낙규의 디펜스" '
+    'OR "김관용의 軍界一學" OR "정충신의 밀리터리"'
+)
+# 제목 안의 연재 태그로 확정 — 쿼리가 물어온 무관 기사를 걸러낸다
+KOREAN_COLUMN_TITLE_PATTERN = re.compile(
+    r"\[(밀리터리\+|밀리터리 ?인사이드|(최현호의 ?)?무기 ?인사이드"
+    r"|이일우의 ?밀리터리 ?(talk|톡)?|박수찬의 ?軍|이철재의 ?밀담"
+    r"|양낙규의 ?(Defence|디펜스) ?(클럽|Club)?|김관용의 ?軍界一學"
+    r"|정충신의 ?밀리터리 ?(카페)?)\]"
+)
+
 # 일반 단어(دفاع=방어/수비, صواريخ=미사일)는 축구·중동정치 기사까지 잡으므로
 # 방산업 특정 표현·회사/무기 아랍어 표기·라틴 제식명만 사용한다
 ARABIC_QUERY = (
@@ -36,17 +110,79 @@ ARABIC_QUERY = (
     'OR "K9" OR "KF-21" OR "FA-50"'
     ")"
 )
+# 현지어 보도 — 폴란드·인니·베트남·튀르키예는 계약 당사국이라 자국어 기사가 먼저 뜬다.
+# 국가명 전체 표기를 필수로 걸어 오검색을 막는다
+POLISH_QUERY = (
+    '"Korea Południowa" AND ('
+    'K2 OR K9 OR "FA-50" OR Hanwha OR "Hyundai Rotem" OR "Homar-K" OR Chunmoo OR Borsuk'
+    ")"
+)
+INDONESIAN_QUERY = (
+    '"Korea Selatan" AND ('
+    '"KF-21" OR "FA-50" OR "T-50" OR Hanwha OR "industri pertahanan" OR "alutsista"'
+    ")"
+)
+VIETNAMESE_QUERY = (
+    '"Hàn Quốc" AND ('
+    '"K9" OR "KF-21" OR "FA-50" OR Hanwha OR "công nghiệp quốc phòng" OR "xuất khẩu vũ khí"'
+    ")"
+)
+TURKISH_QUERY = (
+    '"Güney Kore" AND ('
+    '"KF-21" OR "FA-50" OR "K9" OR "K2" OR Hanwha OR "savunma sanayi"'
+    ")"
+)
+# 페루 잠수함·자주포, 중남미 FA-50 검토국 — 스페인어 현지 보도가 영어보다 빠르다
+SPANISH_QUERY = (
+    '"Corea del Sur" AND ('
+    '"KSS-III" OR submarino OR Hanwha OR "FA-50" OR "KF-21" OR "K9" '
+    'OR "industria de defensa" OR "exportación de armas"'
+    ")"
+)
+# 루마니아: K9·레드백·천궁 대량 구매국
+ROMANIAN_QUERY = (
+    '"Coreea de Sud" AND ('
+    '"K9" OR "K2" OR Hanwha OR "Hyundai Rotem" OR "industria de apărare" OR obuziere'
+    ")"
+)
 
-# (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는 중동 매체 기사를 놓친다
+# (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는
+# 중동·동남아·유럽 현지 매체 기사를 놓친다. 영어판을 앞에 두어
+# 중복 기사는 영어 기사가 대표로 남게 한다.
 FEEDS = [
-    (WEAPONS_QUERY, "en-US", "US", "US:en"),
-    (WEAPONS_QUERY, "en-GB", "GB", "GB:en"),
-    (WEAPONS_QUERY, "en-AE", "AE", "AE:en"),
+    (AIR_QUERY, "en-US", "US", "US:en"),
+    (AIR_QUERY, "en-GB", "GB", "GB:en"),
+    (AIR_QUERY, "en-IN", "IN", "IN:en"),
+    (AIR_QUERY, "en-PH", "PH", "PH:en"),
+    (AIR_QUERY, "en-MY", "MY", "MY:en"),
+    (LAND_QUERY, "en-US", "US", "US:en"),
+    (LAND_QUERY, "en-GB", "GB", "GB:en"),
+    (LAND_QUERY, "en-AU", "AU", "AU:en"),
+    (MISSILE_QUERY, "en-US", "US", "US:en"),
+    (MISSILE_QUERY, "en-GB", "GB", "GB:en"),
+    (NAVAL_QUERY, "en-US", "US", "US:en"),
+    (NAVAL_QUERY, "en-GB", "GB", "GB:en"),
+    (NAVAL_QUERY, "en-CA", "CA", "CA:en"),
     (COMPANY_QUERY, "en-US", "US", "US:en"),
     (COMPANY_QUERY, "en-GB", "GB", "GB:en"),
     (COMPANY_QUERY, "en-AE", "AE", "AE:en"),
+    (EXPORT_QUERY, "en-US", "US", "US:en"),
+    (EXPORT_QUERY, "en-GB", "GB", "GB:en"),
+    (EXPORT_QUERY, "en-AE", "AE", "AE:en"),
+    (COUNTRY_QUERY, "en-US", "US", "US:en"),
+    (COUNTRY_QUERY, "en-IN", "IN", "IN:en"),
     (ARABIC_QUERY, "ar", "SA", "SA:ar"),
     (ARABIC_QUERY, "ar", "EG", "EG:ar"),
+    (POLISH_QUERY, "pl", "PL", "PL:pl"),
+    (INDONESIAN_QUERY, "id", "ID", "ID:id"),
+    (VIETNAMESE_QUERY, "vi", "VN", "VN:vi"),
+    (TURKISH_QUERY, "tr", "TR", "TR:tr"),
+    (SPANISH_QUERY, "es-419", "PE", "PE:es-419"),
+    (ROMANIAN_QUERY, "ro", "RO", "RO:ro"),
+]
+# 국내 방산 칼럼 피드 — 한국언론 제외·AI 관련성 컷을 우회하는 별도 채널
+COLUMN_FEEDS = [
+    (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
 ]
 
 # 한국 언론사 영어보도 제외 (source 이름 소문자 부분일치)
@@ -117,8 +253,18 @@ BRIEF_SYSTEM_PROMPT = (
     "If context is thin, say that the available article snippet is limited. "
     "relevance must be an integer from 0 to 10 scoring how relevant the article is to "
     "South Korea's defense industry: Korean weapons systems, arms exports and deals, "
-    "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, etc.), or military "
-    "cooperation involving South Korea. Articles merely mentioning Korea in passing, "
+    "defense companies (Hanwha, KAI, Hyundai Rotem, LIG Nex1, Poongsan, HD Hyundai, etc.), "
+    "or military cooperation involving South Korea. "
+    "Score 6 or higher for: naval and shipbuilding stories tied to Korean yards "
+    "(KDDX, KSS-III submarines, Hanwha Ocean, Philly Shipyard, MASGA, US Navy MRO work); "
+    "procurement decisions, tenders, negotiations and evaluations by buyer countries "
+    "(Poland, Romania, Egypt, Peru, Philippines, Vietnam, Malaysia, India, Saudi Arabia, "
+    "UAE, Norway, Australia, Canada, Indonesia) involving Korean bids; policy and "
+    "financing news affecting Korean arms exports (export credit, offsets, tech transfer, "
+    "local production); and analysis, comparison or ranking pieces that assess Korean "
+    "weapons against foreign competitors. A foreign-media analysis or ranking of Korean "
+    "systems is relevant even when it reports no new contract. "
+    "Articles merely mentioning Korea in passing, "
     "about North Korea only, or about unrelated industries must score 3 or lower. "
     "Score 0-2 for: sports coverage (in football, 'defense'/دفاع refers to gameplay, "
     "not the military), culture, UNESCO heritage, tourism, entertainment; and articles "
@@ -194,6 +340,9 @@ def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
 
 
 def is_excluded_source(item: dict) -> bool:
+    # 방산 전문기자 연재는 국내 매체라도 통과시킨다
+    if item.get("is_column"):
+        return False
     if os.getenv("EXCLUDE_KOREAN_MEDIA", "true").lower() != "true":
         return False
     # 한글 매체명/제목 = 국내 보도 → 해외 보도만 남긴다
@@ -212,7 +361,38 @@ NON_LATIN_PATTERN = re.compile(
 
 
 def is_english_item(item: dict) -> bool:
+    # 폴란드어·튀르키예어·베트남어·인니어는 라틴 문자라 글자만으로는 구분되지 않는다
+    # → 기사를 잡아온 피드의 언어를 우선 근거로 삼는다
+    if item.get("feed_lang", "en") != "en":
+        return False
     return not NON_LATIN_PATTERN.search(item.get("title", ""))
+
+
+# 오검색이 잦은 문맥: 축구(defense/defence), K2=산, K9=군견, K-컬처.
+# 방산 신호가 함께 없으면 AI 채점 전에 버려 쿼터를 아낀다
+NOISE_TITLE_PATTERN = re.compile(
+    r"(?i)\b(football|soccer|la\s?liga|premier league|world cup|striker|midfielder"
+    r"|k-?pop|bts|blackpink|netflix|box office|drama series|idol"
+    r"|mount k2|k2 mountain|mountaineer|climber|summit push|everest"
+    r"|police dog|dog handler|k-?9 unit|golf|olympic|marathon)\b"
+)
+# 축구 기사의 'defense'(수비)에 구조되지 않도록 단독 defense/arms는 신호로 치지 않는다
+STRONG_DEFENSE_PATTERN = re.compile(
+    r"(?i)(hanwha|hyundai rotem|lig nex1|korea aerospace|poongsan|kf-21|fa-50|k239"
+    r"|chunmoo|cheongung|kddx|kss-iii|ktssm|l-sam|m-sam|hyunmoo|redback|masga"
+    r"|defen[cs]e (?:industry|export|deal|contract|ministry|budget|sector|cooperation"
+    r"|procurement|firm|company|giant)"
+    r"|military|missile|artillery|howitzer|frigate|destroyer|submarine"
+    r"|fighter jet|warship|shipyard|main battle tank|armoured vehicle|armored vehicle"
+    r"|arms (?:deal|export|sale|contract)|weapons? (?:deal|export|system|sale))"
+)
+
+
+def is_noise_item(item: dict) -> bool:
+    title = item.get("title", "")
+    return bool(NOISE_TITLE_PATTERN.search(title)) and not STRONG_DEFENSE_PATTERN.search(
+        title
+    )
 
 
 def is_blocked_domain(item: dict) -> bool:
@@ -230,7 +410,9 @@ def is_blocked_domain(item: dict) -> bool:
     )
 
 
-def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
+def fetch_single_feed(
+    query: str, hl: str, gl: str, ceid: str, is_column: bool = False
+) -> list[dict]:
     request = urllib.request.Request(
         build_rss_url(query, hl, gl, ceid),
         headers={"User-Agent": "Mozilla/5.0"},
@@ -256,6 +438,8 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
                 "pub_date": pub_date,
                 "source": source,
                 "source_url": source_url,
+                "feed_lang": hl.split("-")[0].lower(),
+                "is_column": is_column,
             }
         )
     return items
@@ -264,12 +448,22 @@ def fetch_single_feed(query: str, hl: str, gl: str, ceid: str) -> list[dict]:
 def fetch_feed() -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
-    for query, hl, gl, ceid in FEEDS:
+    feed_specs = [(spec, False) for spec in FEEDS]
+    if os.getenv("INCLUDE_KOREAN_COLUMNS", "true").lower() == "true":
+        feed_specs += [(spec, True) for spec in COLUMN_FEEDS]
+    for (query, hl, gl, ceid), is_column in feed_specs:
         try:
-            feed_items = fetch_single_feed(query, hl, gl, ceid)
+            feed_items = fetch_single_feed(query, hl, gl, ceid, is_column=is_column)
         except Exception as exc:
             print(f"Feed fetch failed ({ceid}): {exc}", file=sys.stderr, flush=True)
             continue
+        if is_column:
+            # 쿼리는 넓게 잡았으므로 제목의 연재 태그로 확정한다
+            feed_items = [
+                item
+                for item in feed_items
+                if KOREAN_COLUMN_TITLE_PATTERN.search(item["title"])
+            ]
         for item in feed_items:
             # 같은 기사가 에디션마다 다른 guid로 잡힐 수 있어 제목+매체로도 dedupe
             dedupe_keys = [
@@ -687,11 +881,15 @@ def format_no_updates_message(now: datetime | None = None) -> str:
     return (
         "<b>뉴스 체크 결과</b>\n"
         f"<b>기준시각:</b> {stamp} (KST)\n"
-        f"{lookback} 동안 신규 기사가 없습니다."
+        f"trailing {lookback} 동안의 신규 기사가 없습니다.\n"
+        "Refresh 주기 1시간. Github-GLOBAL_DEFENCE_NEWs."
     )
 
 
 def should_skip_for_quiet_hours(now: datetime | None = None) -> bool:
+    # 수동 테스트 실행이 조용시간에 막히지 않도록 하는 우회 스위치
+    if os.getenv("IGNORE_QUIET_HOURS", "false").lower() == "true":
+        return False
     current = (now or datetime.now(KST)).astimezone(KST)
     return 0 <= current.hour < 5
 
@@ -717,7 +915,8 @@ def format_item(
     escaped_title = html.escape(item["title"])
 
     lines = [f"{prefix}<b>{escaped_title}</b>"]
-    if translated_title:
+    # 원제가 이미 한국어인 국내 칼럼에는 번역 제목이 무의미하다
+    if translated_title and item.get("feed_lang") != "ko":
         lines.append(f"Title (Korean): {html.escape(translated_title)}")
     if item["source"]:
         lines.append(f"Source: {html.escape(item['source'])}")
@@ -782,6 +981,7 @@ def run_once() -> int:
     excluded_count = 0
     blocked_domain_count = 0
     stale_count = 0
+    noise_count = 0
     new_items = []
     for item in items:
         if item["id"] in seen_ids:
@@ -811,8 +1011,37 @@ def run_once() -> int:
             seen_ids_list.append(item["id"])
             seen_ids.add(item["id"])
             continue
+        if is_noise_item(item):
+            noise_count += 1
+            print(
+                f"Noise (no defense signal): {item['title'][:80]}",
+                flush=True,
+            )
+            seen_ids_list.append(item["id"])
+            seen_ids.add(item["id"])
+            continue
         new_items.append(item)
     new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
+
+    # 쿼리 확대로 후보가 폭증하면 AI 채점 호출만으로 일일 쿼터가 마른다
+    # → 채점 대상 자체를 최신 N건으로 제한하고 나머지는 seen 처리
+    max_to_score = int(os.getenv("MAX_ITEMS_TO_SCORE", "60"))
+    unscored_overflow_count = 0
+    # 칼럼은 반드시 발송해야 하므로 채점 한도 컷 대상에서 제외
+    scorable = [item for item in new_items if not item.get("is_column")]
+    if len(scorable) > max_to_score:
+        column_items = [item for item in new_items if item.get("is_column")]
+        unscored_overflow_count = len(scorable) - max_to_score
+        for item in scorable[:-max_to_score]:
+            seen_ids_list.append(item["id"])
+            seen_ids.add(item["id"])
+        new_items = column_items + scorable[-max_to_score:]
+        new_items.sort(key=lambda item: parse_date_for_sort(item["pub_date"]))
+        print(
+            f"Skipped AI scoring for {unscored_overflow_count} older candidate(s) "
+            f"(MAX_ITEMS_TO_SCORE={max_to_score}).",
+            flush=True,
+        )
 
     deferred_count = 0
     if first_run and os.getenv("SEND_EXISTING_ON_FIRST_RUN", "false").lower() != "true":
@@ -843,6 +1072,10 @@ def run_once() -> int:
         low_relevance_count = 0
         send_items = []
         for item in new_items:
+            # 방산 전문 연재는 관련성 점수·채점 실패와 무관하게 반드시 발송
+            if item.get("is_column"):
+                send_items.append(item)
+                continue
             relevance = (briefs_by_id.get(item["id"]) or {}).get("relevance")
             if isinstance(relevance, int) and relevance < min_relevance:
                 low_relevance_count += 1
@@ -886,6 +1119,10 @@ def run_once() -> int:
                 notes.append(f"집계사이트 제외: {blocked_domain_count}건")
             if stale_count:
                 notes.append(f"오래된 기사 제외: {stale_count}건")
+            if noise_count:
+                notes.append(f"비방산 문맥 제외: {noise_count}건")
+            if unscored_overflow_count:
+                notes.append(f"채점 한도 초과 생략: {unscored_overflow_count}건")
             if overflow_count:
                 notes.append(f"건수 초과 생략: {overflow_count}건")
             separator = format_separator()
@@ -893,10 +1130,13 @@ def run_once() -> int:
                 separator += "\n" + " · ".join(notes)
             send_telegram_message(separator)
             total_items = len(send_items)
-            # 영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            # 국내 칼럼/영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            column_items = [i for i in send_items if i.get("is_column")]
+            foreign_items = [i for i in send_items if not i.get("is_column")]
             sections = [
-                ("영어 뉴스", [i for i in send_items if is_english_item(i)]),
-                ("비영어 뉴스", [i for i in send_items if not is_english_item(i)]),
+                ("국내 방산 칼럼", column_items),
+                ("영어 뉴스", [i for i in foreign_items if is_english_item(i)]),
+                ("비영어 뉴스", [i for i in foreign_items if not is_english_item(i)]),
             ]
             for section_title, section_items in sections:
                 if not section_items:
@@ -954,6 +1194,7 @@ def run_once() -> int:
     print(
         f"Checked {len(items)} item(s), sent {new_count} new message(s), "
         f"excluded {excluded_count} Korean-media item(s), "
+        f"dropped {noise_count} noise item(s), "
         f"deferred {deferred_count} unscored item(s).",
         flush=True,
     )
