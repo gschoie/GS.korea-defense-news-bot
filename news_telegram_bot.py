@@ -881,7 +881,8 @@ def format_no_updates_message(now: datetime | None = None) -> str:
     return (
         "<b>뉴스 체크 결과</b>\n"
         f"<b>기준시각:</b> {stamp} (KST)\n"
-        f"{lookback} 동안 신규 기사가 없습니다."
+        f"trailing {lookback} 동안의 신규 기사가 없습니다.\n"
+        "Refresh 주기 1시간. Github-GLOBAL_DEFENCE_NEWs."
     )
 
 
