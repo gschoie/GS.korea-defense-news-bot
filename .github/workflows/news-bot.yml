@@ -39,7 +39,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-2.5-flash
+          # flash-lite 최신 별칭: 무료 일일 한도가 2.5-flash보다 훨씬 커서
+          # 시간당 실행 × 청크 채점에도 새벽 소진('AI 채점 실패 발송 보류')이 없다
+          GEMINI_MODEL: gemini-flash-lite-latest
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.2
           RUN_MODE: once

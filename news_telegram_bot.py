@@ -635,7 +635,7 @@ def openai_request(body: dict) -> dict:
 
 def gemini_request(system_text: str, user_text: str) -> str:
     """Gemini generateContent 호출 → 응답 텍스트(JSON 문자열) 반환."""
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
     body = {
         "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
