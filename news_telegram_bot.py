@@ -37,6 +37,9 @@ AIR_QUERY = (
 LAND_QUERY = (
     '"K239" OR "Chunmoo" OR "Cheonmoo" OR "Hyundai Rotem" OR "K2 Black Panther" '
     'OR "K9 Thunder" OR "K9 Vajra" OR "AS9 Huntsman" OR "AS21 Redback" OR "Homar-K" OR "K808" '
+    # 미 육군 자주포 사업 — K9MH가 응찰. 사업명 기사엔 Korea/Hanwha가 제목에 없어
+    # 사업명 자체를 무가드로 잡는다 (KAAN·GCAP과 같은 '경쟁 프로그램' 패턴)
+    'OR "Mobile Tactical Cannon" OR "SPH-M" '
     f'OR (({KOREA_GUARD}) AND ("K2 tank" OR "K9 howitzer" OR "K21" OR "K10" OR "K30" '
     'OR Redback OR Tigon))'
 )
@@ -185,6 +188,21 @@ COLUMN_FEEDS = [
     (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
 ]
 
+# 공보·1차 소스 직접 구독 — 구글뉴스가 색인하지 않는 발표를 잡는다.
+# 미 육군 MTC 기종 선정(army.mil) 같은 보도자료는 구글뉴스 검색 RSS에
+# 안 올라와 쿼리를 아무리 넓혀도 못 잡는다. (name, url, 제목 프리필터 정규식)
+# 프리필터: 공보 피드는 진급·부대 소식이 대부분이라, 한국 방산과 닿을 수 있는
+# 화력·조달 주제만 남기고 AI 채점이 최종 관련성을 가른다.
+DIRECT_FEEDS = [
+    (
+        "U.S. Army",
+        "https://www.army.mil/rss/static/1.xml",
+        r"(?i)(howitzer|artiller|cannon|self-propelled|\bMTC\b|SPH-M|Hanwha|\bK9\b"
+        r"|K239|Chunmoo|rocket launcher|\bHIMARS\b|counter-fire|fires modernization"
+        r"|long.range precision fires|\bLRPF\b|Korea)",
+    ),
+]
+
 # 한국 언론사 영어보도 제외 (source 이름 소문자 부분일치)
 EXCLUDED_SOURCE_KEYWORDS = [
     "korea herald",
@@ -258,8 +276,11 @@ BRIEF_SYSTEM_PROMPT = (
     "Score 6 or higher for: naval and shipbuilding stories tied to Korean yards "
     "(KDDX, KSS-III submarines, Hanwha Ocean, Philly Shipyard, MASGA, US Navy MRO work); "
     "procurement decisions, tenders, negotiations and evaluations by buyer countries "
-    "(Poland, Romania, Egypt, Peru, Philippines, Vietnam, Malaysia, India, Saudi Arabia, "
-    "UAE, Norway, Australia, Canada, Indonesia) involving Korean bids; policy and "
+    "(the United States, Poland, Romania, Egypt, Peru, Philippines, Vietnam, Malaysia, "
+    "India, Saudi Arabia, UAE, Norway, Australia, Canada, Indonesia) involving Korean "
+    "bids — including US Army artillery programs such as the Mobile Tactical Cannon "
+    "and SPH-M where Hanwha's K9 competes, even when the article does not name the "
+    "Korean bidder; policy and "
     "financing news affecting Korean arms exports (export credit, offsets, tech transfer, "
     "local production); and analysis, comparison or ranking pieces that assess Korean "
     "weapons against foreign competitors. A foreign-media analysis or ranking of Korean "
@@ -445,6 +466,36 @@ def fetch_single_feed(
     return items
 
 
+def fetch_direct_feed(name: str, url: str, title_filter: str) -> list[dict]:
+    """일반 RSS(공보 사이트 등)를 직접 읽는다. 구글뉴스 형식과 달리 source 태그가 없다."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        xml_bytes = response.read()
+
+    pattern = re.compile(title_filter)
+    host = urllib.parse.urlparse(url).netloc
+    items = []
+    for item in ET.fromstring(xml_bytes).findall("./channel/item"):
+        title = (item.findtext("title") or "(no title)").strip()
+        if not pattern.search(title):
+            continue
+        link = (item.findtext("link") or "").strip()
+        guid = (item.findtext("guid") or "").strip()
+        items.append(
+            {
+                "id": guid or link or title,
+                "title": title,
+                "link": link,
+                "pub_date": item.findtext("pubDate", default=""),
+                "source": name,
+                "source_url": f"https://{host}",
+                "feed_lang": "en",
+                "is_column": False,
+            }
+        )
+    return items
+
+
 def fetch_feed() -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
@@ -474,6 +525,27 @@ def fetch_feed() -> list[dict]:
                 continue
             seen_keys.update(dedupe_keys)
             merged.append(item)
+
+    if os.getenv("INCLUDE_DIRECT_FEEDS", "true").lower() == "true":
+        for name, url, title_filter in DIRECT_FEEDS:
+            try:
+                direct_items = fetch_direct_feed(name, url, title_filter)
+            except Exception as exc:
+                print(
+                    f"Direct feed fetch failed ({name}): {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            for item in direct_items:
+                dedupe_keys = [
+                    item["id"],
+                    f"{item['title'].strip().lower()}|{item['source'].strip().lower()}",
+                ]
+                if any(key in seen_keys for key in dedupe_keys):
+                    continue
+                seen_keys.update(dedupe_keys)
+                merged.append(item)
     return merged
 
 
