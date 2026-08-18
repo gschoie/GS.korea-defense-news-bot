@@ -346,7 +346,12 @@ def get_news_lookback(now: datetime | None = None) -> str:
 
 
 def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
-    lookback = get_news_lookback()
+    # site: 공보 피드는 구글의 .mil 색인 시차가 커서 일반 12h 창이면 놓친다
+    # → 넓은 창을 쓴다. seen dedupe가 재발송을 막으므로 비용은 미미하다
+    if query.startswith("site:"):
+        lookback = os.getenv("SITE_FEED_LOOKBACK", "48h")
+    else:
+        lookback = get_news_lookback()
     if lookback:
         query = f"{query} when:{lookback}"
 
