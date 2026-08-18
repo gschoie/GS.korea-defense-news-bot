@@ -148,6 +148,13 @@ ROMANIAN_QUERY = (
     '"K9" OR "K2" OR Hanwha OR "Hyundai Rotem" OR "industria de apărare" OR obuziere'
     ")"
 )
+# 공보 사이트 전용 구글뉴스 site: 피드 — army.mil 보도자료는 일반 주제 쿼리
+# 랭킹에 거의 안 올라오므로 도메인을 지정해 강제로 끌어온다. (army.mil RSS를
+# 직접 치는 방식은 Akamai가 GitHub Actions IP를 403으로 차단해 불가)
+SITE_ARMY_QUERY = (
+    'site:army.mil (howitzer OR artillery OR cannon OR "Mobile Tactical Cannon" '
+    "OR Korea OR Hanwha OR K9 OR Chunmoo OR HIMARS)"
+)
 
 # (query, hl, gl, ceid) — 에디션별로 색인/랭킹이 달라 미국판 하나로는
 # 중동·동남아·유럽 현지 매체 기사를 놓친다. 영어판을 앞에 두어
@@ -188,14 +195,6 @@ FEEDS = [
 COLUMN_FEEDS = [
     (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
 ]
-
-# 공보 사이트 전용 구글뉴스 site: 피드 — army.mil 보도자료는 일반 주제 쿼리
-# 랭킹에 거의 안 올라오므로 도메인을 지정해 강제로 끌어온다. (army.mil RSS를
-# 직접 치는 방식은 Akamai가 GitHub Actions IP를 403으로 차단해 불가)
-SITE_ARMY_QUERY = (
-    'site:army.mil (howitzer OR artillery OR cannon OR "Mobile Tactical Cannon" '
-    "OR Korea OR Hanwha OR K9 OR Chunmoo OR HIMARS)"
-)
 
 # 공보·1차 소스 RSS 직접 구독 (name, url, 제목 프리필터 정규식).
 # 공보 피드는 진급·부대 소식이 대부분이라 프리필터로 화력·조달 주제만 남기고
