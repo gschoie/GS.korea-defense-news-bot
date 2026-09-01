@@ -44,6 +44,7 @@ Chiron = the Bugatti, Redback = the spider) are wrapped in a
 ## What It Does
 
 - Pulls Google News RSS search results from 30 feeds (15 queries x their editions, including the Korean column channel) and dedupes them
+- Adds a second Korean-media exception channel for domestic exclusives: articles whose title carries a `[단독]` tag together with a defense keyword pass the Korean-media filter (e.g. Kukmin Ilbo's exclusive on the US Navy shipbuilding delegation touring Korean yards), go through the normal AI relevance gate, and arrive in their own `[국내 단독]` Telegram section. Toggle with `INCLUDE_KOREAN_SCOOPS` (default `true`)
 - Additionally subscribes to primary-source RSS feeds directly (`DIRECT_FEEDS`, toggle `INCLUDE_DIRECT_FEEDS`): official announcements like army.mil press releases rarely surface in Google News search results, so program-selection news (e.g. the US Army's Mobile Tactical Cannon, where Hanwha's K9MH competes) would otherwise be invisible. A per-feed title regex keeps only fires/procurement/Korea topics, then the normal AI relevance gate applies
 - Filters out articles that were already sent
 - Excludes Korean domestic media (English-language outlets like Korea Herald / Yonhap / Aju Press, plus any article with Hangul in title or source) — toggle with `EXCLUDE_KOREAN_MEDIA`

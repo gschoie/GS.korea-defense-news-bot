@@ -194,6 +194,24 @@ FEEDS = [
     (SITE_ARMY_QUERY, "en-US", "US", "US:en"),
 ]
 # 국내 방산 칼럼 피드 — 한국언론 제외·AI 관련성 컷을 우회하는 별도 채널
+# 국내 [단독] 방산 스쿠프 — 국내 언론 제외 정책의 두 번째 예외 채널.
+# 단독 기사는 외신이 받아쓰기 전까지 해외 피드 어디에도 없어서
+# (예: 국민일보 단독 '미 해군성 실세 방한, 한국 조선소 실사') 통째로 빠진다.
+# 제목에 [단독] 태그 + 방산 키워드가 함께 있어야 통과하고,
+# 칼럼과 달리 AI 채점을 거쳐 야구단(한화이글스)류 오검색을 거른다
+KOREAN_SCOOP_QUERY = (
+    '"단독" AND (방산 OR 군함 OR 잠수함 OR 전투기 OR 미사일 OR 조선소 '
+    'OR 방위사업청 OR "K방산" OR 자주포 OR 무기 OR 한화오션 OR 한화에어로스페이스 '
+    "OR 현대로템 OR LIG넥스원 OR 한국항공우주)"
+)
+SCOOP_TAG_PATTERN = re.compile(r"[\[(〈<【]\s*단독\s*[\])〉>】]")
+SCOOP_DEFENSE_PATTERN = re.compile(
+    r"방산|군함|조선소|잠수함|전투기|미사일|자주포|호위함|구축함|이지스|K-?방산"
+    r"|방위사업|방사청|한화오션|한화에어로|한화시스템|현대로템|LIG넥스원|KAI"
+    r"|한국항공우주|HD현대|풍산|해군|공군|국방|무기|수출\s*계약|수주|MRO|잠수함"
+    r"|천무|천궁|현무|수리온|흑표|장보고"
+)
+
 COLUMN_FEEDS = [
     (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
     # 연재명 검색은 구글이 '밀리터리+'의 +를 무시해 사실상 '밀리터리' 검색이 되고
@@ -373,8 +391,8 @@ def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
 
 
 def is_excluded_source(item: dict) -> bool:
-    # 방산 전문기자 연재는 국내 매체라도 통과시킨다
-    if item.get("is_column"):
+    # 방산 전문기자 연재·[단독] 스쿠프는 국내 매체라도 통과시킨다
+    if item.get("is_column") or item.get("is_scoop"):
         return False
     if os.getenv("EXCLUDE_KOREAN_MEDIA", "true").lower() != "true":
         return False
@@ -522,22 +540,36 @@ def fetch_direct_feed(name: str, url: str, title_filter: str) -> list[dict]:
 def fetch_feed() -> list[dict]:
     merged: list[dict] = []
     seen_keys: set[str] = set()
-    feed_specs = [(spec, False) for spec in FEEDS]
+    feed_specs = [(spec, "foreign") for spec in FEEDS]
     if os.getenv("INCLUDE_KOREAN_COLUMNS", "true").lower() == "true":
-        feed_specs += [(spec, True) for spec in COLUMN_FEEDS]
-    for (query, hl, gl, ceid), is_column in feed_specs:
+        feed_specs += [(spec, "column") for spec in COLUMN_FEEDS]
+    if os.getenv("INCLUDE_KOREAN_SCOOPS", "true").lower() == "true":
+        feed_specs += [((KOREAN_SCOOP_QUERY, "ko", "KR", "KR:ko"), "scoop")]
+    for (query, hl, gl, ceid), kind in feed_specs:
         try:
-            feed_items = fetch_single_feed(query, hl, gl, ceid, is_column=is_column)
+            feed_items = fetch_single_feed(
+                query, hl, gl, ceid, is_column=(kind == "column")
+            )
         except Exception as exc:
             print(f"Feed fetch failed ({ceid}): {exc}", file=sys.stderr, flush=True)
             continue
-        if is_column:
+        if kind == "column":
             # 쿼리는 넓게 잡았으므로 제목의 연재 태그로 확정한다
             feed_items = [
                 item
                 for item in feed_items
                 if KOREAN_COLUMN_TITLE_PATTERN.search(item["title"])
             ]
+        elif kind == "scoop":
+            # [단독] 태그와 방산 키워드가 제목에 함께 있어야 스쿠프로 인정
+            feed_items = [
+                item
+                for item in feed_items
+                if SCOOP_TAG_PATTERN.search(item["title"])
+                and SCOOP_DEFENSE_PATTERN.search(item["title"])
+            ]
+            for item in feed_items:
+                item["is_scoop"] = True
         for item in feed_items:
             # 같은 기사가 에디션마다 다른 guid로 잡힐 수 있어 제목+매체로도 dedupe
             dedupe_keys = [
@@ -1225,11 +1257,21 @@ def run_once() -> int:
                 separator += "\n" + " · ".join(notes)
             send_telegram_message(separator)
             total_items = len(send_items)
-            # 국내 칼럼/영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
+            # 국내 칼럼/국내 단독/영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
             column_items = [i for i in send_items if i.get("is_column")]
-            foreign_items = [i for i in send_items if not i.get("is_column")]
+            scoop_items = [
+                i
+                for i in send_items
+                if i.get("is_scoop") and not i.get("is_column")
+            ]
+            foreign_items = [
+                i
+                for i in send_items
+                if not i.get("is_column") and not i.get("is_scoop")
+            ]
             sections = [
                 ("국내 방산 칼럼", column_items),
+                ("국내 단독", scoop_items),
                 ("영어 뉴스", [i for i in foreign_items if is_english_item(i)]),
                 ("비영어 뉴스", [i for i in foreign_items if not is_english_item(i)]),
             ]
