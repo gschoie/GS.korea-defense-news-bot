@@ -8,7 +8,8 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "17 * * * *"
+    # 매시 17분·47분 — 30분 간격 (KST 00:00~04:59 quiet hours는 봇이 스스로 스킵)
+    - cron: "17,47 * * * *"
 
 permissions:
   contents: write
