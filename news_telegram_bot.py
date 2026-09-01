@@ -199,18 +199,32 @@ FEEDS = [
 # (예: 국민일보 단독 '미 해군성 실세 방한, 한국 조선소 실사') 통째로 빠진다.
 # 제목에 [단독] 태그 + 방산 키워드가 함께 있어야 통과하고,
 # 칼럼과 달리 AI 채점을 거쳐 야구단(한화이글스)류 오검색을 거른다
+# intitle:로 제목에 '단독'이 있는 기사만 후보로 받는다 — '단독'은 전 분야 공통
+# 태그라 본문 매칭까지 열면 100건 캡 랭킹에서 정작 방산 단독이 밀린다
 KOREAN_SCOOP_QUERY = (
-    '"단독" AND (방산 OR 군함 OR 잠수함 OR 전투기 OR 미사일 OR 조선소 '
-    'OR 방위사업청 OR "K방산" OR 자주포 OR 무기 OR 한화오션 OR 한화에어로스페이스 '
+    "intitle:단독 AND (방산 OR 군함 OR 잠수함 OR 전투기 OR 미사일 OR 조선소 "
+    'OR 방위사업청 OR "K방산" OR 자주포 OR 호위함 OR 수주 OR 한화오션 '
     "OR 현대로템 OR LIG넥스원 OR 한국항공우주)"
 )
+# 국내 수주·계약 이벤트 — 단독 태그가 없어도 시장에 중요한 발주·입찰 기사
+# (예: 뉴시스 '태국 4조 호위함 도입 윤곽, K조선 수주 총력')를 잡는다
+KOREAN_DEAL_QUERY = (
+    '(수주 OR 계약 OR 입찰 OR "우선협상" OR 발주) AND '
+    '(호위함 OR 잠수함 OR 군함 OR 구축함 OR 방산 OR 조선소 OR "K조선" '
+    "OR 자주포 OR 전투기 OR 미사일)"
+)
 SCOOP_TAG_PATTERN = re.compile(r"[\[(〈<【]\s*단독\s*[\])〉>】]")
+# 수주·계약 같은 이벤트성 낱말은 여기 넣지 않는다 — DEAL 필터가
+# '이벤트 낱말 AND 방산 낱말'이라, 겹치면 아파트 수주까지 통과된다
 SCOOP_DEFENSE_PATTERN = re.compile(
     r"방산|군함|조선소|잠수함|전투기|미사일|자주포|호위함|구축함|이지스|K-?방산"
-    r"|방위사업|방사청|한화오션|한화에어로|한화시스템|현대로템|LIG넥스원|KAI"
-    r"|한국항공우주|HD현대|풍산|해군|공군|국방|무기|수출\s*계약|수주|MRO|잠수함"
+    r"|K-?조선|방위사업|방사청|한화오션|한화에어로|한화시스템|현대로템|LIG넥스원|KAI"
+    r"|한국항공우주|HD현대|풍산|해군|공군|국방|무기|MRO"
+    r"|전차|장갑차|방공|KF-?21|FA-?50|KDDX|레드백"
     r"|천무|천궁|현무|수리온|흑표|장보고"
 )
+# 수주 이벤트 낱말 — 방산 키워드와 제목에 같이 있어야 통과 (아파트·배터리 수주 차단)
+DEAL_EVENT_PATTERN = re.compile(r"수주|계약|선정|우선협상|입찰|도입|발주|낙찰")
 
 COLUMN_FEEDS = [
     (KOREAN_COLUMN_QUERY, "ko", "KR", "KR:ko"),
@@ -372,9 +386,10 @@ def get_news_lookback(now: datetime | None = None) -> str:
 
 
 def build_rss_url(query: str, hl: str, gl: str, ceid: str) -> str:
-    # site: 공보 피드는 구글의 .mil 색인 시차가 커서 일반 12h 창이면 놓친다
-    # → 넓은 창을 쓴다. seen dedupe가 재발송을 막으므로 비용은 미미하다
-    if query.startswith("site:"):
+    # site: 공보 피드는 구글의 .mil 색인 시차가 커서 일반 12h 창이면 놓친다.
+    # 국내 단독·수주 피드도 조간 단독이 저녁 실행 시점에 12h 창 밖으로 밀리는
+    # 사례(국민일보 단독)가 있어 넓은 창을 쓴다. seen dedupe가 재발송을 막는다
+    if query.startswith("site:") or query in (KOREAN_SCOOP_QUERY, KOREAN_DEAL_QUERY):
         lookback = os.getenv("SITE_FEED_LOOKBACK", "48h")
     else:
         lookback = get_news_lookback()
@@ -544,7 +559,10 @@ def fetch_feed() -> list[dict]:
     if os.getenv("INCLUDE_KOREAN_COLUMNS", "true").lower() == "true":
         feed_specs += [(spec, "column") for spec in COLUMN_FEEDS]
     if os.getenv("INCLUDE_KOREAN_SCOOPS", "true").lower() == "true":
-        feed_specs += [((KOREAN_SCOOP_QUERY, "ko", "KR", "KR:ko"), "scoop")]
+        feed_specs += [
+            ((KOREAN_SCOOP_QUERY, "ko", "KR", "KR:ko"), "scoop"),
+            ((KOREAN_DEAL_QUERY, "ko", "KR", "KR:ko"), "deal"),
+        ]
     for (query, hl, gl, ceid), kind in feed_specs:
         try:
             feed_items = fetch_single_feed(
@@ -566,6 +584,16 @@ def fetch_feed() -> list[dict]:
                 item
                 for item in feed_items
                 if SCOOP_TAG_PATTERN.search(item["title"])
+                and SCOOP_DEFENSE_PATTERN.search(item["title"])
+            ]
+            for item in feed_items:
+                item["is_scoop"] = True
+        elif kind == "deal":
+            # 수주·계약 이벤트 낱말과 방산 키워드가 제목에 함께 있어야 통과
+            feed_items = [
+                item
+                for item in feed_items
+                if DEAL_EVENT_PATTERN.search(item["title"])
                 and SCOOP_DEFENSE_PATTERN.search(item["title"])
             ]
             for item in feed_items:
@@ -1271,7 +1299,7 @@ def run_once() -> int:
             ]
             sections = [
                 ("국내 방산 칼럼", column_items),
-                ("국내 단독", scoop_items),
+                ("국내 단독·수주", scoop_items),
                 ("영어 뉴스", [i for i in foreign_items if is_english_item(i)]),
                 ("비영어 뉴스", [i for i in foreign_items if not is_english_item(i)]),
             ]
