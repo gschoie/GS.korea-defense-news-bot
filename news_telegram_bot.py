@@ -1108,6 +1108,86 @@ def send_telegram_message(text: str) -> None:
         response.read()
 
 
+# 제목에서 주제 판별용 토큰 추출 — 받아쓰기 기사들은 제목이 조금씩 달라
+# guid·제목 완전일치 dedupe로는 안 걸린다 (한화오션 태국 호위함 우협 기사가
+# 매체 12곳에서 12건으로 발송된 사례). 불용어와 한 글자 토큰은 버린다
+_TOPIC_STOPWORDS = {
+    "기사", "뉴스", "속보", "단독", "종합", "영상", "포토", "위해", "이르면",
+    "the", "of", "to", "in", "for", "and", "on", "at", "with", "as", "by",
+}
+
+
+def topic_tokens(title: str) -> set[str]:
+    tokens = re.findall(r"[가-힣A-Za-z0-9]+", title.lower())
+    return {t for t in tokens if len(t) >= 2 and t not in _TOPIC_STOPWORDS}
+
+
+def _tokens_match(a: str, b: str) -> bool:
+    # 한국어 조사가 붙은 변형('우선협상대상자로'/'우선협상대상자', '선정에'/'선정')을
+    # 같은 토큰으로 취급한다 — 접두 일치면 동일 낱말로 본다
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def same_topic(tokens_a: set[str], tokens_b: set[str]) -> bool:
+    if not tokens_a or not tokens_b:
+        return False
+    small, big = sorted((tokens_a, tokens_b), key=len)
+    matched = sum(1 for t in small if any(_tokens_match(t, u) for u in big))
+    # 짧은 쪽 대비 겹침 비율(containment) — 제목 길이가 달라도 같은 주제면 높다
+    return matched >= 3 and matched / len(small) >= 0.5
+
+
+def cluster_by_topic(items: list[dict]) -> list[list[dict]]:
+    """제목이 사실상 같은 주제인 기사들을 묶는다. 각 묶음의 첫 기사가 대표.
+
+    단일연결(어느 한 멤버와라도 같은 주제면 합류) + 마지막에 묶음끼리 병합해,
+    오묘한 제목이 먼저 와서 씨앗이 갈라져도 결국 한 묶음이 되게 한다.
+    """
+    clusters: list[list[tuple[set[str], dict]]] = []
+    for item in items:
+        tokens = topic_tokens(item.get("title", ""))
+        for members in clusters:
+            if any(same_topic(tokens, t) for t, _ in members):
+                members.append((tokens, item))
+                break
+        else:
+            clusters.append([(tokens, item)])
+
+    # 병합 폐포: 서로 다른 묶음의 멤버끼리 같은 주제면 묶음을 합친다
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(clusters)):
+            for j in range(len(clusters) - 1, i, -1):
+                if any(
+                    same_topic(ta, tb)
+                    for ta, _ in clusters[i]
+                    for tb, _ in clusters[j]
+                ):
+                    clusters[i].extend(clusters.pop(j))
+                    merged = True
+    return [[item for _, item in members] for members in clusters]
+
+
+def format_topic_digest(members: list[dict], now: datetime | None = None) -> str:
+    """대표 기사 외 같은 주제 기사들을 한 메시지로 압축한다."""
+    stamp = (now or datetime.now(KST)).astimezone(KST).strftime("%m.%d %H:%M")
+    lines = [
+        f"🔁 같은 주제 추가 기사 {len(members)}건 (요약 묶음 · {stamp})"
+    ]
+    shown = members[:10]
+    for member in shown:
+        source = member.get("source", "").strip() or "?"
+        # 리다이렉트 리졸브는 기사당 네트워크 요청이라 묶음에서는 원 링크를 그대로 쓴다
+        lines.append(
+            f"• {html.escape(member['title'])} — {html.escape(source)}\n"
+            f"  {html.escape(member.get('link', ''))}"
+        )
+    if len(members) > len(shown):
+        lines.append(f"…외 {len(members) - len(shown)}건")
+    return "\n".join(lines)
+
+
 def parse_date_for_sort(value: str) -> float:
     if not value:
         return 0.0
@@ -1253,14 +1333,21 @@ def run_once() -> int:
             send_items.append(item)
 
         # 쿼리 확대 직후 폭주 방지: 최신 N건만 발송, 나머지는 seen 처리
+        # 같은 주제 받아쓰기 기사들을 묶는다 — 발송 상한도 묶음 단위로 세어
+        # 우협 선정 기사 12건이 상한을 잠식해 다른 뉴스를 밀어내지 않게 한다
+        send_clusters = cluster_by_topic(send_items)
+        grouped_count = sum(len(c) - 1 for c in send_clusters)
+
         max_per_run = int(os.getenv("MAX_ITEMS_PER_RUN", "25"))
         overflow_count = 0
-        if len(send_items) > max_per_run:
-            overflow_count = len(send_items) - max_per_run
-            for item in send_items[:-max_per_run]:
-                seen_ids_list.append(item["id"])
-                seen_ids.add(item["id"])
-            send_items = send_items[-max_per_run:]
+        if len(send_clusters) > max_per_run:
+            overflow_count = len(send_clusters) - max_per_run
+            for cluster in send_clusters[:-max_per_run]:
+                for item in cluster:
+                    seen_ids_list.append(item["id"])
+                    seen_ids.add(item["id"])
+            send_clusters = send_clusters[-max_per_run:]
+        send_items = [item for cluster in send_clusters for item in cluster]
 
         if send_items:
             notes = []
@@ -1278,6 +1365,8 @@ def run_once() -> int:
                 notes.append(f"비방산 문맥 제외: {noise_count}건")
             if unscored_overflow_count:
                 notes.append(f"채점 한도 초과 생략: {unscored_overflow_count}건")
+            if grouped_count:
+                notes.append(f"같은 주제 묶음: {grouped_count}건")
             if overflow_count:
                 notes.append(f"건수 초과 생략: {overflow_count}건")
             separator = format_separator()
@@ -1285,42 +1374,53 @@ def run_once() -> int:
                 separator += "\n" + " · ".join(notes)
             send_telegram_message(separator)
             total_items = len(send_items)
-            # 국내 칼럼/국내 단독/영어/비영어를 섹션으로 나눠 발송하고 번호도 섹션별로 매긴다
-            column_items = [i for i in send_items if i.get("is_column")]
-            scoop_items = [
-                i
-                for i in send_items
-                if i.get("is_scoop") and not i.get("is_column")
-            ]
-            foreign_items = [
-                i
-                for i in send_items
-                if not i.get("is_column") and not i.get("is_scoop")
-            ]
+
+            # 국내 칼럼/국내 단독/영어/비영어 섹션은 묶음 대표 기사 기준으로 나눈다
+            def section_of(lead: dict) -> str:
+                if lead.get("is_column"):
+                    return "국내 방산 칼럼"
+                if lead.get("is_scoop"):
+                    return "국내 단독·수주"
+                return "영어 뉴스" if is_english_item(lead) else "비영어 뉴스"
+
             sections = [
-                ("국내 방산 칼럼", column_items),
-                ("국내 단독·수주", scoop_items),
-                ("영어 뉴스", [i for i in foreign_items if is_english_item(i)]),
-                ("비영어 뉴스", [i for i in foreign_items if not is_english_item(i)]),
+                ("국내 방산 칼럼", []),
+                ("국내 단독·수주", []),
+                ("영어 뉴스", []),
+                ("비영어 뉴스", []),
             ]
-            for section_title, section_items in sections:
-                if not section_items:
+            section_map = dict(sections)
+            for cluster in send_clusters:
+                section_map[section_of(cluster[0])].append(cluster)
+
+            for section_title, section_clusters in sections:
+                section_clusters = section_map[section_title]
+                if not section_clusters:
                     continue
-                send_telegram_message(
-                    f"<b>[{section_title}]</b> {len(section_items)}건"
-                )
-                section_total = len(section_items)
-                for index, item in enumerate(section_items, start=1):
+                member_total = sum(len(c) for c in section_clusters)
+                header = f"<b>[{section_title}]</b> {len(section_clusters)}건"
+                if member_total > len(section_clusters):
+                    header += f" (관련기사 {member_total}건)"
+                send_telegram_message(header)
+                section_total = len(section_clusters)
+                for index, cluster in enumerate(section_clusters, start=1):
+                    lead = cluster[0]
                     send_telegram_message(
                         format_item(
-                            item,
-                            briefs_by_id.get(item["id"]),
+                            lead,
+                            briefs_by_id.get(lead["id"]),
                             index=index,
                             total=section_total,
                         )
                     )
-                    seen_ids_list.append(item["id"])
-                    seen_ids.add(item["id"])
+                    seen_ids_list.append(lead["id"])
+                    seen_ids.add(lead["id"])
+                    # 같은 주제 받아쓰기들은 한 메시지로 압축해 뒤따라 보낸다
+                    if len(cluster) > 1:
+                        send_telegram_message(format_topic_digest(cluster[1:]))
+                        for member in cluster[1:]:
+                            seen_ids_list.append(member["id"])
+                            seen_ids.add(member["id"])
                     if total_items > 3:
                         time.sleep(1.1)
         else:
