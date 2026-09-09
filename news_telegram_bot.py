@@ -1334,8 +1334,21 @@ def run_once() -> int:
 
         # 쿼리 확대 직후 폭주 방지: 최신 N건만 발송, 나머지는 seen 처리
         # 같은 주제 받아쓰기 기사들을 묶는다 — 발송 상한도 묶음 단위로 세어
-        # 우협 선정 기사 12건이 상한을 잠식해 다른 뉴스를 밀어내지 않게 한다
-        send_clusters = cluster_by_topic(send_items)
+        # 우협 선정 기사 12건이 상한을 잠식해 다른 뉴스를 밀어내지 않게 한다.
+        # 묶음은 국내 채널(칼럼·단독·수주)에만 적용 — 해외 기사는 매체별 논조가
+        # 달라 받아쓰기가 아니므로 영어·비영어 섹션은 건별로 그대로 보낸다
+        domestic_items = [
+            i for i in send_items if i.get("is_column") or i.get("is_scoop")
+        ]
+        foreign_send_items = [
+            i
+            for i in send_items
+            if not i.get("is_column") and not i.get("is_scoop")
+        ]
+        send_clusters = cluster_by_topic(domestic_items) + [
+            [i] for i in foreign_send_items
+        ]
+        send_clusters.sort(key=lambda c: parse_date_for_sort(c[0]["pub_date"]))
         grouped_count = sum(len(c) - 1 for c in send_clusters)
 
         max_per_run = int(os.getenv("MAX_ITEMS_PER_RUN", "25"))
