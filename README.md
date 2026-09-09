@@ -51,7 +51,7 @@ Chiron = the Bugatti, Redback = the spider) are wrapped in a
 - Drops obvious non-defense context before spending AI calls: titles matching football / K-pop / K2-the-mountain / police-dog patterns with no defense signal alongside them (bare "defense" does not count as a signal, since it means gameplay in football coverage)
 - Scores each article's relevance to the Korean defense industry with AI (0-10) and silently drops items below `MIN_RELEVANCE` (default 4)
 - Caps AI scoring at `MAX_ITEMS_TO_SCORE` items per run (default 60, newest first) so a broad-query day cannot exhaust the daily AI quota
-- Groups same-topic rewrites before sending: articles whose titles are effectively the same story (particle-aware token overlap, e.g. a dozen outlets rewriting one 우선협상대상자 announcement) collapse into one full lead message plus a single `🔁 같은 주제 추가 기사 N건 (요약 묶음)` digest listing title/outlet/link for the rest
+- Groups same-topic rewrites before sending — domestic channels only (칼럼·단독·수주): articles whose titles are effectively the same story (particle-aware token overlap, e.g. a dozen outlets rewriting one 우선협상대상자 announcement) collapse into one full lead message plus a single `🔁 같은 주제 추가 기사 N건 (요약 묶음)` digest listing title/outlet/link for the rest. English/non-English foreign sections are never grouped — each article sends individually
 - Caps each run at `MAX_ITEMS_PER_RUN` topic groups (default 30, newest first) — a rewrite storm counts as one group, so it cannot crowd out unrelated news
 - Splits the Telegram output into English / non-English sections using the source feed's language, so Polish, Turkish, Vietnamese and Indonesian articles are not mislabeled as English just because they use the Latin alphabet
 - Pushes only new matches to your Telegram chat
